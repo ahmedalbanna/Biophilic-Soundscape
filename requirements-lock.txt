@@ -1,0 +1,9 @@
+# Exact versions this project was built and tested against.
+# Regenerate with:  pip freeze > requirements-lock.txt
+# Install with:     pip install -r requirements-lock.txt
+#
+# Only direct dependencies are listed; transitive deps are resolved by pip.
+numpy==1.26.4
+requests==2.32.3
+pygame==2.6.1
+sounddevice==0.5.6

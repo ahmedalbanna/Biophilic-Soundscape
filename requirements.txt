@@ -1,0 +1,21 @@
+# Context-Aware Audio Engine - Yemeni Cultural Calendar
+#
+# Runtime dependencies. The engine works with only these.
+# Upper bounds pin what the project was verified against (see requirements-lock.txt).
+#
+# numpy   - WAV synthesis + RMS/dB math
+# requests- Aladhan prayer times API
+# pygame  - audio playback with crossfade and volume (falls back to winsound)
+# sounddevice - microphone capture (falls back to a manual slider)
+numpy>=1.24,<2
+requests>=2.31,<3
+pygame>=2.5,<3
+sounddevice>=0.5,<1
+
+# Build only
+pyinstaller>=6.0,<7
+
+# Optional accuracy upgrade, kept separate on purpose: webrtcvad is a C
+# extension and needs Microsoft Visual C++ Build Tools to install, which most
+# machines do not have. Without it the engine detects speech from energy alone.
+#   pip install -r requirements-optional.txt

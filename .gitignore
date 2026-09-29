@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Tools
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Secrets
+.env
+.env.*
+
+# Build output
+build/
+dist/
+context_audio.spec
+
+# Generated at runtime
+assets/_scaled/
+assets/settings.json
+assets/prayer_cache.json

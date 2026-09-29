@@ -1,0 +1,7 @@
+# Optional accuracy upgrade for speech detection.
+#
+# webrtcvad is a C extension: installing it requires Microsoft Visual C++ Build
+# Tools (https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+# Without it the engine falls back to energy-only VAD, which works but is less
+# accurate in noisy rooms. The app logs which mode is active at startup.
+webrtcvad>=2.0.10,<3
