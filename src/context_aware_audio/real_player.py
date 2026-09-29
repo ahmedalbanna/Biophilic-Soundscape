@@ -16,6 +16,10 @@ from .audio_types import PlaybackCommand
 from .paths import assets_dir, user_data_dir
 from .sound_synth import ensure_assets
 
+# قنوات المزج: 0 و 1 للعبور المتقابطة (crossfade)، وقناة مستقلة للتنبيهات القصيرة حتى لا يقطعها كتم الخلفية.
+CROSSFADE_CHANNELS = 2
+ALERT_CHANNEL = 7
+
 
 class RealPlayer:
     """مشغّل حقيقي بصوت فعلي: crossfade، fade ناعم، master volume، وEQ."""
@@ -102,7 +106,10 @@ class RealPlayer:
                     w.writeframes(pcm.tobytes())
             self._scaled_cache[key] = str(dst)
             return str(dst)
-        except Exception:
+        except (OSError, ValueError) as e:
+            # الرجوع بلا تخفيض = تشغيل بصوت كامل رغم طلب خفض.
+            # نُبلغ بدل ادّعاء أن التخفيض نجح بصمت.
+            print(f"volume scaling failed for {name}@{bucket}: {e}")
             return str(src)
 
     def _play_loop_winsound(self, path: str | None) -> None:
@@ -134,7 +141,7 @@ class RealPlayer:
         if self._pg is None:
             return
         try:
-            for i in range(2):
+            for i in range(CROSSFADE_CHANNELS):
                 self._pg.mixer.Channel(i).fadeout(max(0, fade_ms))
         except Exception:
             pass
@@ -266,9 +273,8 @@ class RealPlayer:
             vol = max(0.0, min(1.0, volume * self.master_volume))
             try:
                 if self._pg is not None:
-                    src = str(assets_dir() / name)
-                    snd = self._pg.mixer.Sound(src)
-                    ch = self._pg.mixer.Channel(7)
+                    snd = self._ensure_sound(name)  # مخبأ: لا قراءة قرص في خيط الواجهة
+                    ch = self._pg.mixer.Channel(ALERT_CHANNEL)
                     ch.set_volume(vol)
                     ch.play(snd, loops=0)
                     return True

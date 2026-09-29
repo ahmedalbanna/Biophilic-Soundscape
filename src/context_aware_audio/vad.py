@@ -48,6 +48,21 @@ class VadProcessor:
         """يضبط أرضية ضجيج الغرفة ليرفع عتبة الكلام فوقها."""
         self.noise_floor_db = max(0.0, min(80.0, floor_db))
 
+    def reset(self) -> None:
+        """
+        يمسح كل حالة الكشف.
+
+        الواجهة تستدعي analyze_frame حتى أثناء التوقف، فيتراكم نصف نافذة نبرة
+        الترحيب ثم يُستهلك بعد التشغيل - نغمة ترحيب تتأخر ثوانٍ
+        بعد ضغط المستخدم على "تشغيل". يُستدعى مع engine.reset().
+        """
+        self._prev_db = 0.0
+        self._prev_time = time.time()
+        self._has_prev = False
+        self._elevated_since = None
+        self._peak_jump_db = 0.0
+        self._last_greeting_time = 0.0
+
     def speech_threshold(self) -> float:
         """عتبة الكلام: لا تقل عن speech_threshold_db، وترتفع فوق ضجيج الغرفة."""
         base = self.config.speech_threshold_db
@@ -56,7 +71,7 @@ class VadProcessor:
         return max(base, self.noise_floor_db + self.config.noise_floor_margin_db)
 
     def _detect_greeting(
-        self, db_level: float, jump: float, dt: float, is_speech: bool, ts: float
+        self, db_level: float, jump: float, is_speech: bool, ts: float
     ) -> bool:
         """
         نبرة الترحيب = قفزة بداية + بقاء فوق العتبة.
@@ -100,8 +115,7 @@ class VadProcessor:
         is_speech = db_level >= self.speech_threshold()
         is_overlapping = is_speech and db_level >= cfg.loud_debate_threshold_db
         jump = db_level - self._prev_db
-        dt = ts - self._prev_time
-        is_greeting_tone = self._detect_greeting(db_level, jump, dt, is_speech, ts)
+        is_greeting_tone = self._detect_greeting(db_level, jump, is_speech, ts)
 
         frame = AudioFrame(
             timestamp=ts,

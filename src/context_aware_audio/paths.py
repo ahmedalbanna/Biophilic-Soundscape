@@ -42,3 +42,24 @@ def writable_path(name: str) -> Path:
     d = user_data_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d / name
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """
+    يكتب عبر ملف مؤقت ثم `os.replace` - كتابة ذرّية.
+
+    الكتابة المباشرة تُبقي الملف مقتطعاً إذا قُتلت العملية أثناءها، ثم
+    يغذّي التنظيفَ التالي. الاستبدال ذرّي على NTFS.
+    """
+    import os
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise

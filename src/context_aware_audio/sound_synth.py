@@ -15,7 +15,7 @@ from .paths import assets_dir
 SR = 22050
 DURATION_SEC = 8.0
 
-ASSETS_DIR = assets_dir()
+
 
 
 def _write_wav(path: Path, samples: np.ndarray) -> None:
@@ -185,22 +185,41 @@ BUILDERS = {
 }
 
 
+def missing_assets() -> list:
+    """أسماء ملفات WAV الناقصة (لا تمسّ القرص)."""
+    base = assets_dir()
+    return [name for name in BUILDERS if not (base / name).exists()]
+
+
 def ensure_assets(force: bool = False) -> list:
+    """
+    يولّد ملفات WAV الناقصة ويعيد ما أنشأه.
+
+    في وضع التجميد (PyInstaller) المجلد للقراءة فقط، فيفشل التوليد بخطأ
+    صلاحيات. لذلك نُبلغ عن الناقص بدل ابتلاع الخطأ بصمت.
+    """
     made = []
+    base = assets_dir()
     for name, fn in BUILDERS.items():
-        path = ASSETS_DIR / name
+        path = base / name
         if path.exists() and not force:
             continue
-        _write_wav(path, fn())
+        try:
+            _write_wav(path, fn())
+        except OSError:
+            continue
         made.append(str(path))
     return made
 
 
 def main() -> None:
     made = ensure_assets(force=True)
-    print(f"generated {len(made)} files in {ASSETS_DIR}")
+    absent = missing_assets()
+    print(f"generated {len(made)} files in {assets_dir()}")
     for p in made:
         print(f"  {p}")
+    if absent:
+        print(f"WARNING: {len(absent)} asset(s) still missing: {', '.join(absent)}")
 
 
 if __name__ == "__main__":

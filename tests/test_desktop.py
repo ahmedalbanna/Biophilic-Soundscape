@@ -2,6 +2,7 @@
 اختبارات سطح المكتب - hermetic: بلا صوت حقيقي، بلا شبكة، بلا لمس لإعدادات المستخدم
 """
 
+import json
 import struct
 import sys
 import tempfile
@@ -18,7 +19,12 @@ from src.context_aware_audio import prayer_provider, prayer_engine, settings
 from src.context_aware_audio.mic_input import MicInput
 from src.context_aware_audio.prayer_engine import PrayerEngine
 from src.context_aware_audio.real_player import RealPlayer
-from src.context_aware_audio.sound_synth import ASSETS_DIR, BUILDERS, ensure_assets
+from src.context_aware_audio.sound_synth import (
+    BUILDERS,
+    ensure_assets,
+    missing_assets,
+)
+from src.context_aware_audio.paths import assets_dir
 from src.context_aware_audio.vad import VadProcessor
 
 PASSED = FAILED = 0
@@ -37,7 +43,7 @@ def check(name, cond, extra=""):
 # ============ 1) الأصول الصوتية موجودة وصالحة ============
 ensure_assets(force=False)
 for name in BUILDERS:
-    path = ASSETS_DIR / name
+    path = assets_dir() / name
     check(f"asset exists {name}", path.exists())
     if path.exists():
         try:
@@ -249,7 +255,6 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
     # b) كاش اليوم -> لا نداء للشبكة إطلاقاً
-    import json
 
     today = _dt.date.today()
     cache.write_text(
@@ -429,6 +434,208 @@ finally:
     import shutil
 
     shutil.rmtree(_win, ignore_errors=True)
+
+# ============ 12) دورة حياة الميكروفون على pyaudio ============
+# Bug كان يمنع أي إعادة تشغيل بعد إيقاف واحد، ويُبطل الميكروفون نهائياً.
+import types as _types
+
+
+class _FakeStream:
+    def read(self, n, **kw):
+        return b"\x00" * (n * 2)
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakePA:
+    def open(self, **kw):
+        return _FakeStream()
+
+    def terminate(self):
+        pass
+
+    def get_device_count(self):
+        return 2
+
+    def get_device_info_by_index(self, i):
+        return {"maxInputChannels": 1, "name": f"Mic {i}"}
+
+
+class _FakePyAudio(_FakePA):
+    paInt16 = 8
+
+
+def _fake_pyaudio():
+    mod = _types.ModuleType("pyaudio")
+    mod.PyAudio = _FakePyAudio
+    mod.paInt16 = 8  # ثابت على مستوى الوحدة كما في المكتبة الحقيقية
+    return mod
+
+
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    m2 = MicInput()
+    m2._sd = None
+    m2._pyaudio = sys.modules["pyaudio"]
+    m2.backend = "pyaudio"
+    m2.available = True
+    first = m2.start()
+    check("pyaudio: first start succeeds", first, m2.backend)
+    m2.stop()
+    check("pyaudio: available survives stop", m2.available)
+    second = m2.start()
+    check("pyaudio: restart after stop succeeds", second)
+    check("pyaudio: still available after restart", m2.available, m2.backend)
+    m2.stop()
+    devs = MicInput._devices_via_pyaudio()
+    check("pyaudio: device listing works", len(devs) == 2, devs)
+    check("pyaudio: device entries well formed", all(len(d) == 2 for d in devs), devs)
+
+# فشل التقاط عابر يجب ألّا يُعطّل الجهاز نهائياً
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    m3 = MicInput()
+    m3._sd = None
+    m3._pyaudio = sys.modules["pyaudio"]
+    m3.backend = "pyaudio"
+    m3.available = True
+    with mock.patch.object(_FakePyAudio, "open", side_effect=OSError("busy")):
+        r = m3.start()
+    check("pyaudio: transient failure returns False", r is False)
+    check("pyaudio: transient failure keeps device available", m3.available)
+
+# ============ 13) الإعدادات: أنواع خاطئة ومجال خارجي ============
+_t = tempfile.mkdtemp()
+try:
+    sp = Path(_t) / "settings.json"
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_t) / n):
+        sp.write_text(
+            json.dumps(
+                {
+                    "master_vol": "loud",
+                    "use_mic": "false",
+                    "mic_device": 7,
+                    "master_mute": 0,
+                    "athan_enabled": None,
+                    "injected": "evil",
+                }
+            ),
+            encoding="utf-8",
+        )
+        s2 = settings.load_settings()
+        check("settings: bad float falls back", s2["master_vol"] == 100.0, s2)
+        check("settings: string 'false' is False", s2["use_mic"] is False, s2)
+        check("settings: int 0 is False", s2["master_mute"] is False, s2)
+        check("settings: None falls back", s2["athan_enabled"] is True, s2)
+        check("settings: valid int device kept", s2["mic_device"] == 7, s2)
+        check("settings: unknown key dropped", "injected" not in s2, s2)
+
+        # المجال المقبول: القيم السابعة تُقصّ إلى المجال (أفصلً أحسن من المتعبّر ضعيفاً)
+        for bad, expected in (
+            (9999, 100.0),
+            (-5, 0.0),
+            (float("nan"), 100.0),
+            (float("inf"), 100.0),
+        ):
+            sp.write_text(json.dumps({"master_vol": bad}), encoding="utf-8")
+            v = settings.load_settings()["master_vol"]
+            check(f"settings: master_vol {bad!r} -> {expected}", v == expected, v)
+        for bad in ([], {}, "loud", None, True):
+            sp.write_text(json.dumps({"master_vol": bad}), encoding="utf-8")
+            v = settings.load_settings()["master_vol"]
+            check(f"settings: master_vol {bad!r} -> 100.0", v == 100.0, v)
+
+        sp.write_text(json.dumps({"mic_device": -3}), encoding="utf-8")
+        check(
+            "settings: negative device -> None",
+            settings.load_settings()["mic_device"] is None,
+        )
+        sp.write_text(json.dumps({"mic_device": "abc"}), encoding="utf-8")
+        check(
+            "settings: junk device -> None",
+            settings.load_settings()["mic_device"] is None,
+        )
+
+        check(
+            "settings: save coerces too",
+            settings.save_settings({"master_vol": "x", "use_mic": "true"}),
+        )
+        written = json.loads(sp.read_text(encoding="utf-8"))
+        check("settings: saved value coerced", written["master_vol"] == 100.0, written)
+        check(
+            "settings: no temp file left", not (Path(_t) / "settings.json.tmp").exists()
+        )
+finally:
+    import shutil
+
+    shutil.rmtree(_t, ignore_errors=True)
+
+# ============ 14) VAD.reset() يمسح نافذة الترحيب ============
+_v = VadProcessor(EngineConfig())
+_v.analyze_frame(30.0, timestamp=100.0)
+_v.analyze_frame(75.0, timestamp=100.1)  # يرفع النافذة دون إكمال الشرط
+check("vad: greeting pending before reset", _v._elevated_since is not None)
+_v.reset()
+check("vad: reset clears elevation window", _v._elevated_since is None)
+check("vad: reset clears peak jump", _v._peak_jump_db == 0.0)
+check("vad: reset clears has_prev", _v._has_prev is False)
+_fired = _v.analyze_frame(75.0, timestamp=100.5)
+check("vad: no greeting right after reset", not _fired.is_greeting_tone)
+
+# أضف noise_floor إلى reset؟ (يُحفظ عمداً - إعداد وليس حالة)
+_v2 = VadProcessor(EngineConfig())
+_v2.set_noise_floor(25.0)
+_v2.reset()
+check("vad: reset keeps calibrated floor", _v2.noise_floor_db == 25.0)
+
+# ============ 15) play_once يستخدم المخبأ (لا قراءة قرص) ============
+_calls = {"n": 0}
+
+
+def _counting_sound(path):
+    _calls["n"] += 1
+    return object()
+
+
+_fake_pg2, _sink2 = _make_fake_pygame()
+_fake_pg2.mixer.Sound = _counting_sound
+with mock.patch.dict(sys.modules, {"pygame": _fake_pg2}):
+    pl2 = RealPlayer()
+    pl2.play_once("athan_chime.wav")
+    pl2.play_once("athan_chime.wav")
+    check("player: play_once uses sound cache", _calls["n"] == 1, _calls)
+    pl2.stop()
+
+# ============ 16) أصول الصوت: كشف الناقص لا ابتلاعه ============
+check("assets: none reported missing", missing_assets() == [], missing_assets())
+
+# مجلد للقراءة فقط: التوليد يجب أن يفشل بهدءة لا أن يرمي
+_ro = tempfile.mkdtemp()
+try:
+    with mock.patch(
+        "src.context_aware_audio.sound_synth.assets_dir", return_value=Path(_ro)
+    ):
+        check(
+            "assets: empty dir reports all missing",
+            len(missing_assets()) == len(BUILDERS),
+        )
+        # على Windows لا يُمنع chmod للمجلدات، فنسبب الكتابة مباشرة
+        with mock.patch(
+            "src.context_aware_audio.sound_synth._write_wav",
+            side_effect=PermissionError("read-only"),
+        ):
+            made = ensure_assets(force=False)
+        check("assets: read-only dir yields no files", made == [], made[:2])
+        check(
+            "assets: still reports missing after failure",
+            len(missing_assets()) == len(BUILDERS),
+        )
+finally:
+    import shutil
+
+    shutil.rmtree(_ro, ignore_errors=True)
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

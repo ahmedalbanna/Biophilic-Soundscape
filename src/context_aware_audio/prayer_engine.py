@@ -64,8 +64,15 @@ class PrayerEngine:
         }
 
     def set_times(self, times: Dict[str, dtime]) -> None:
-        """حقن أوقات مخصصة (للمحاكاة والاختبار أو API خارجي مثل Aladhan)"""
-        self._times.update(times)
+        """
+        حقن أوقات مخصصة (للمحاكاة والاختبار أو API خارجي مثل Aladhan).
+
+        تُرشّح إلى أسماء الصلوات المعروفة فقط: كاش أو ملف معدَّل يدوياً قد
+        يحمل مفاتيح غريبة لا يجب أن تصل إلى حسابات النوافذ.
+        """
+        for name, value in times.items():
+            if name in self.PRAYER_NAMES and isinstance(value, dtime):
+                self._times[name] = value
         self._cache_date = None  # إبطال الكاش
 
     def _shift_to_host_time(self, day: date, t: dtime) -> datetime:

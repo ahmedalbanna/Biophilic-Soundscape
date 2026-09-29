@@ -9,6 +9,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -58,9 +59,24 @@ def startup_bat_path() -> Path:
     )
 
 
+def _is_our_bat(path: Path) -> bool:
+    """
+    هل الملف bat كتبناه نحن؟
+
+    لا نريد أن ندّعي ملكية ملف أنشأه شيء آخر بنفس الاسم، ولا أن نحذفه عند
+    إيقاف التشغيل التلقائي.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return fh.readline().strip().lower() == "@echo off"
+    except OSError:
+        return False
+
+
 def is_autostart() -> bool:
     try:
-        return startup_bat_path().exists()
+        path = startup_bat_path()
+        return path.exists() and _is_our_bat(path)
     except OSError:
         return False
 
@@ -83,16 +99,20 @@ def set_autostart(on: bool) -> bool:
     try:
         target = startup_bat_path()
         if not on:
-            target.unlink(missing_ok=True)
+            # لا نحذف ملفاً لم نكتبه نحن
+            if target.exists() and _is_our_bat(target):
+                target.unlink(missing_ok=True)
             return True
         target.parent.mkdir(parents=True, exist_ok=True)
         if getattr(sys, "frozen", False):
             work_dir = str(Path(sys.executable).parent)
         else:
             work_dir = str(Path(__file__).resolve().parents[2])
+        # `%` محرف توسيع في cmd.exe، و`&` و`^` لهما معنى خاص
+        safe_dir = work_dir.replace("%", "%%").replace("^", "^^").replace("&", "^&")
         target.write_text(
             "@echo off\nchcp 65001 >nul\nset PYTHONUTF8=1\n"
-            f'cd /d "{work_dir}"\n{" ".join(_launch_command())}\n',
+            f'cd /d "{safe_dir}"\n{" ".join(_launch_command())}\n',
             encoding="utf-8",
         )
         return True
@@ -128,6 +148,7 @@ class DesktopApp:
         self._prayer_queue = queue.Queue()
         self._prayer_date = None
         self._athan_played: set = set()
+        self._scenario_until = 0.0
         self.athan_enabled = tk.BooleanVar(
             value=bool(self._settings.get("athan_enabled", True))
         )
@@ -138,6 +159,8 @@ class DesktopApp:
             value=bool(self._settings.get("master_mute", False))
         )
         self._last_mute = False
+        self._last_vol = -1.0
+        self._last_eq = -1.0
         self.autostart = tk.BooleanVar(value=is_autostart())
         self._save_counter = 0
         self.period_eq = {
@@ -362,6 +385,7 @@ class DesktopApp:
             f"webrtcvad: {'on' if self.vad.webrtc_available else 'off (energy only)'}"
         )
         self.engine.reset()
+        self.vad.reset()  # حالة الكشف تتراكم أثناء التوقف بدون هذا
         self.running = True
         self.status_text.set("يعمل - صوت حقيقي عبر السماعات")
         self._log(f"engine started (player={self.player.backend})")
@@ -431,6 +455,12 @@ class DesktopApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _scenario(self, kind: str):
+        """
+        يزرع سيناريو لثوانٍ قليلة.
+
+        بدون التثبيت كانت النبضة التالية (200ms) تستبدله بإطار حقيقي من
+        الميكروفون فيختفي الأثر فوراً. نحتفظ بالإطار المزروع حتى ينتهي.
+        """
         if not self.running:
             self.start()
         now = datetime.now()
@@ -439,28 +469,39 @@ class DesktopApp:
             fr = AudioFrame(
                 timestamp=ts, db_level=70, is_speech=True, is_overlapping=True
             )
-            self._log("سيناريو: نقاش حامي 70dB")
+            label, hold = "نقاش حامي 70dB", 3.0
         elif kind == "welcome":
             fr = AudioFrame(
                 timestamp=ts, db_level=62, is_speech=True, is_greeting_tone=True
             )
-            self._log("سيناريو: ترحيب ضيوف")
+            label, hold = "ترحيب ضيوف", 9.0
         elif kind == "silence":
             base = ts - 11
             self.engine.process_frame(
                 AudioFrame(timestamp=base, db_level=45, is_speech=True), now
             )
             fr = AudioFrame(timestamp=ts, db_level=20, is_speech=False)
-            self._log("سيناريو: صمت 11ث -> Fade-In")
+            label, hold = "صمت 11ث -> Fade-In", 3.0
         else:
             fr = AudioFrame(timestamp=ts, db_level=50, is_speech=True)
-            self._log("سيناريو: كلام عادي")
+            label, hold = "كلام عادي", 3.0
+        self._scenario_until = time.time() + hold
+        self._log(f"سيناريو: {label} (مثبَّت {hold:.0f}ث)")
         cmd = self.engine.process_frame(fr, now)
-        line = self.player.apply(cmd)
+        self.player.apply(cmd)
         self._log(str(cmd))
-        self._log(line)
+
+    def _scenario_db(self) -> float | None:
+        """مستوى dB المزروع ما زال سارياً، وإلا None."""
+        if self._scenario_until and time.time() < self._scenario_until:
+            return 75.0
+        self._scenario_until = 0.0
+        return None
 
     def _current_db(self) -> float:
+        pinned = self._scenario_db()
+        if pinned is not None:
+            return pinned
         if self.use_mic.get() and self.mic.available:
             db = self.mic.read_db()
             if db is not None:
@@ -508,14 +549,25 @@ class DesktopApp:
         self._log(f"نغمة الأذان: {hit}")
 
     def _apply_output_settings(self, now: datetime, db: float):
-        """يرفع الصوت الرئيسي والكتم ومعادل الفترة إلى المشغّل."""
-        self.player.set_master_volume(float(self.master_vol.get()) / 100.0)
+        """
+        يرفع الصوت الرئيسي والكتم ومعادل الفترة إلى المشغّل.
+
+        لا نعيد دفع القيم لم يتغيّر: كل دفعة تستهلك قفلاً في المشغّل،
+        وتحريك المعامل المتكرر يُولّد خيوط تدرّج بلا فائدة.
+        """
+        vol = float(self.master_vol.get()) / 100.0
+        if abs(vol - self._last_vol) >= 0.005:
+            self.player.set_master_volume(vol)
+            self._last_vol = vol
         mute = bool(self.master_mute.get())
         if mute != self._last_mute:
             self.player.set_master_muted(mute)
             self._last_mute = mute
         period = self.engine.calendar.period_for_datetime(now)
-        self.player.set_eq(self.period_eq.get(period.value, 1.0))
+        eq = self.period_eq.get(period.value, 1.0)
+        if eq != self._last_eq:
+            self.player.set_eq(eq)
+            self._last_eq = eq
 
     def _update_readouts(self, now, cmd, db: float, is_speech: bool):
         """يحدّث لوحات القراءة: الفترة، الحالة، العدّاد، الصلاة التالية، الشريط."""
@@ -555,16 +607,27 @@ class DesktopApp:
 
 def main(log_path: Optional[Path] = None) -> None:
     """
-    نقطة تشغيل الواجهة.
+    نقطة تشغيل الواجهة - لكل مسارات الدخول.
 
-    log_path: مسار ملف السجل (يظهر في الواجهة عند التسليم في وضع الـ exe)
+    يثبّت التسجيل هنا لا في نقطة دخول الـ exe وحدها، حتى يحصل
+    `python -m src.context_aware_audio.app` (أمر التطوير الموثّق) سجلاً
+    أيضاً. تمرير log_path مسبقاً (من desktop_app.py) يتجاوز التثبيت.
     """
     if tk is None:
         print("tkinter is not available")
         sys.exit(2)
+    if log_path is None:
+        from .log_setup import install as install_logging
+
+        log_path = install_logging()
     root = tk.Tk()
     DesktopApp(root, log_path=log_path)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        from .log_setup import close as close_logging
+
+        close_logging()  # يُغلق مقبض الملف حتى يمكن تدويره أو حذفه
 
 
 if __name__ == "__main__":

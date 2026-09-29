@@ -9,7 +9,7 @@ from datetime import time as dtime
 from typing import Dict, NamedTuple, Optional
 
 from .config import EngineConfig
-from .paths import writable_path
+from .paths import atomic_write, writable_path
 
 CACHE_FILENAME = "prayer_cache.json"
 
@@ -65,15 +65,16 @@ def _read_cache() -> Optional[PrayerTimes]:
 
 
 def _write_cache(day: date, times: Dict[str, dtime]) -> None:
+    """يكتب الكاش ذرّياً حتى لا يُبقى ملفاً مقتطعاً بعد انقطاع العملية."""
     try:
-        writable_path(CACHE_FILENAME).write_text(
+        atomic_write(
+            writable_path(CACHE_FILENAME),
             json.dumps(
                 {
                     "date": day.isoformat(),
                     "times": {k: v.strftime("%H:%M") for k, v in times.items()},
                 }
             ),
-            encoding="utf-8",
         )
     except OSError:
         pass
