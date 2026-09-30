@@ -549,5 +549,74 @@ check("reset: room quiet cleared", eng._room_quiet_since is None)
 check("reset: last stamp cleared", eng._last_ts is None)
 done(tmp, store)
 
+
+# ===== 10) الساعتان: إزاحة المحاكاة لا يجوز أن تغيّر قراراً واحداً =====
+# _room_quiet_since يُقارن بطابع ts في كل مكان من الوحدة — كان _start
+# يبذره بـ now.timestamp() وهي ساعة المحاكاة في app.py. فالإزاحة كلها
+# تدخل quiet_for، والحقل لا يُصحَّح إلا حين يصير None (عند إطار عالٍ)،
+# فالبذرة الخاطئة تعيش بقية اليوم.
+#
+# النافذة هنا once_per_day=False حتى يبدأ مقطع ثانٍ: مع النافذة الحقيقية
+# يبدأ مقطع واحد ويقفل الباب فلا يظهر الأثر أصلاً.
+class SplitClock:
+    """ساعتان متفرقتان عمداً: ts حقيقي و now مُزاح — كما يفعل app.py."""
+
+    def __init__(self, offset_sec, base=None):
+        self.now = base or datetime(2026, 9, 30, 14, 0, 0)
+        self.ts = self.now.timestamp()
+        self.offset = timedelta(seconds=offset_sec)
+
+    def tick(self, seconds=STEP):
+        self.ts += seconds
+        self.now = datetime.fromtimestamp(self.ts) + self.offset
+        return self.now, self.ts
+
+
+def repeating_config():
+    cfg = EngineConfig()
+    cfg.content_windows["maqil_story"] = dict(cfg.content_windows["maqil_story"])
+    cfg.content_windows["maqil_story"]["once_per_day"] = False
+    cfg.content_min_gap_min = 0
+    return cfg
+
+
+def trace_with_offset(offset_sec):
+    """أرقام الإطارات التي بدأ فيها سرد. القائمة هي القرار كله."""
+    tmp, eng, store, _cfg = build(
+        period_files=[
+            ("maqil_story__001__a.wav", 4.0),
+            ("maqil_story__002__b.wav", 4.0),
+        ],
+        config=repeating_config(),
+    )
+    clock = SplitClock(offset_sec)
+    starts = []
+    try:
+        for i in range(400):
+            now, ts = clock.tick()
+            d = eng.update(frame(), ts, now, DayPeriod.MAQIL)
+            if d.action.value == "start":
+                starts.append(i)
+    finally:
+        done(tmp, store)
+    return starts
+
+
+_base = trace_with_offset(0)
+_neg = trace_with_offset(-14400)
+_pos = trace_with_offset(14400)
+
+check("clocks: the unshifted run replays the sequence", len(_base) >= 2, _base)
+check(
+    "clocks: a negative offset does not jump the silence window",
+    _neg == _base,
+    f"{-14400:+d}ث: {_neg} مقابل {_base}",
+)
+check(
+    "clocks: a positive offset does not kill the content for the day",
+    _pos == _base,
+    f"{+14400:+d}ث: {_pos} مقابل {_base}",
+)
+
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

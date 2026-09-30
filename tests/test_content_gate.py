@@ -389,5 +389,77 @@ check(
 )
 done(tmp, store)
 
+
+# ===== 11) السقف: الأرضية لا ترفع منحنى الخفض ولا تكذب في السجل =====
+# كان السطر `cmd.volume_ratio = content_ambient_ratio` بلا شرط: كل
+# نسبةAway تُنسخ. عند 64.9dB يقرر المحرك 10% ويسمّي السبب «خفض 90%»
+# بينما تستقبل الخلطة 20% — أي أعلى مماقرر، في أسوأ لحظة: كلام عالٍ
+# على بُعد 0.1dB من كتم النقاش الحامي. وMIN_DUCK_RATIO يصبح غير قابل
+# للوصول ما دام المحتوى يعمل.
+#
+# نقطة 40dB لا تكفي: المنحنى عندها 0.22 أو أقل، فالسقف والإسناد
+# يتّفقان صدفةً. الفارق يظهر حيث المنحنى أدنى من السقف.
+tmp, engine, store, cfg = build()
+clock = new_clock()
+step(engine, clock, 10.0)
+check("ceiling: the content is running before we raise the voice",
+      engine.content.is_running is True, engine.content.state)
+
+# نقطة مرجعية: كلام هادئ، المنحنى فوق السقف
+def ratio_at(db, frames=6):
+    """يبثّ كلاماً بمستوى ثابت ويعيد آخر أمر."""
+    for _ in range(frames):
+        clock["ts"] += STEP
+        clock["now"] = datetime.fromtimestamp(clock["ts"])
+        engine.process_frame(
+            AudioFrame(
+                timestamp=clock["ts"],
+                db_level=db,
+                is_speech=True,
+            ),
+            clock["now"],
+        )
+    return engine.last_command
+
+
+low = ratio_at(35.0)
+# السقف يخفض لا يرفع: عند كلام هادئ يكون المنحنى فوق السقف
+# فيُقصّ إلى السقف. وهذا هو الفارق عن الاستبدال في الاتجاه
+# المعاكس: هناك صار المنحنى ميتاً، وهنا يبقى حيّاً.
+low = ratio_at(35.0)
+check(
+    "ceiling: a quiet voice is capped at the floor",
+    abs(low.volume_ratio - cfg.content_ambient_ratio) < 1e-9,
+    f"{low.volume_ratio:.3f} مقابل {cfg.content_ambient_ratio}",
+)
+check(
+    "ceiling: and the cap is what did it, not the curve",
+    low.volume_ratio < engine.duck_max_ratio() + 1e-9,
+    f"المنحنى الأقصى {engine.duck_max_ratio():.3f}",
+)
+
+# النقطة الحاسمة: كلام عالٍ جداً
+high = ratio_at(64.9)
+check("ceiling: the applied ratio never exceeds the floor",
+      high.volume_ratio <= cfg.content_ambient_ratio + 1e-9,
+      f"{high.volume_ratio:.3f} > {cfg.content_ambient_ratio}")
+check("ceiling: and it is the duck curve, not the floor",
+      high.volume_ratio < cfg.content_ambient_ratio - 0.01,
+      f"{high.volume_ratio:.3f}")
+check("ceiling: the deep duck is still reachable with content on",
+      high.volume_ratio < engine.duck_min_ratio() + 0.02,
+      f"{high.volume_ratio:.3f} مقابل أدنى {engine.duck_min_ratio():.3f}")
+
+# ما يكتبه السجل يجب أن يصف ما استُعمل
+import re as _re
+
+_m = _re.search(r"خفض\s*(\d+)%", high.reason)
+_claimed = int(_m.group(1)) if _m else -1
+_applied_cut = round((1.0 - high.volume_ratio) * 100)
+check("ceiling: the log states the reduction that was applied",
+      _claimed == _applied_cut,
+      f"السجل يقول {_claimed}% والاستُعمل {_applied_cut}%")
+done(tmp, store)
+
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

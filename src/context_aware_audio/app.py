@@ -630,11 +630,16 @@ class DesktopApp:
         """
         ينفّذ قرار المحتوى على المشغّل. القرار يبقى في المحرك.
 
+        `cmd` قد يكون None حين يكون المحرك متوقفاً. نُبقي النداء
+        في كل الأحوال لأن قراءة اللوحة يجب أن تتجدّد أثناء التوقف:
+        العنوان والموضع ومسار المكتبة. حذف النداء مع فرع المحرك
+        كان يترك اللوحة تعرض آخر نبضة شغّل فيها المحرك.
+
         الكتم يعطّل المؤشر نفسه لا المشغّل وحده: تركه يعمل يعني أن
         الموضع يتقدّم بلا صوت، فيخرج الوقت من الشريط، فلا يبقى
         عند رفع الكتم ما يُستأنف. فالكتم يوقفه مؤقتاً، ورفعه يعيده.
         """
-        if self.content_player is None:
+        if self.content_player is None or cmd is None:
             self._update_content_readout()
             return
         eng = self.content
@@ -1064,6 +1069,11 @@ class DesktopApp:
             if self.greeting.get():
                 auto.is_greeting_tone = True
                 auto.is_speech = True
+            # المحرك متوقف عند الإقلاع وقبل كل ضغطة «ابدأ». بدون هذا
+            # السطر كان الاسم `cmd` مستعملاً قبل إسنادِه، فيرتفع
+            # استثناء في أوّل نبضة من عمر التطبيق - وفي كل نبضة بعد
+            # الإيقاف - وابتلاعُه في catch أدناه أخفى الأمر كله.
+            cmd = None
             if self.running:
                 cmd = self.engine.process_frame(auto, now)
                 # عطل في التشغيل لا يجب أن يوقف قراءة الواجهة: نعزله هنا
@@ -1089,6 +1099,9 @@ class DesktopApp:
                 )
             else:
                 self.db_label.config(text=f"dB: {auto.db_level:.0f} (المحرك متوقف)")
+            # cmd قد يكون None: النبضة تعمل قبل «ابدأ» وبعد كل ضغطة
+            # إيقاف. _content_tick محتاجة المنادى كلّه حتى تتجدّد قراءة
+            # اللوحة، فلا يسقط النداء مع فرع المحرك.
             self._content_tick(cmd, now)
             self._update_sim_readout(now, real_now)
             self._maybe_save_settings()

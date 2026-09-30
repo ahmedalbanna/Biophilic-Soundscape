@@ -152,7 +152,9 @@ class ContentEngine:
         self._close_log(OUTCOME_SKIPPED, now=datetime.now())
         self.reset()
 
-    def request_now(self, clip, now: datetime) -> bool:
+    def request_now(
+        self, clip, now: datetime, ts: Optional[float] = None
+    ) -> bool:
         """
         تشغيل مقطع بطلب صريح، متجاوزاً البوابة.
 
@@ -167,7 +169,7 @@ class ContentEngine:
             return False
         self._close_log(OUTCOME_ABANDONED, now=now)
         self.reset()
-        self._start(clip, clip["window_key"], now)
+        self._start(clip, clip["window_key"], now, ts)
         self.state = ContentState.PLAYING
         self._room_quiet_since = None  # البوابة لن تعيد التحقق لهذا المقطع
         return True
@@ -230,6 +232,10 @@ class ContentEngine:
         self._position_sec = 0.0
         self._window_key = None
         self._postpones = 0
+        # _room_quiet_since لا يُمسح هنا عمداً: هو مقياس لهدوء الغرفة
+        # لا للمقطع. تصفيره هنا كان سيجعل النافذة التالية تنتظر نافذة
+        # هدوء جديدة رغم أن الغرفة لم تنقطع. يُمسح في reset() وحده،
+        # وعند أي إطار عالٍ.
         self.state = ContentState.IDLE
         return ContentDecision(
             action=ContentAction.STOP,
@@ -252,6 +258,7 @@ class ContentEngine:
             self._log_id = None
             self._position_sec = 0.0
             self._window_key = None
+            # هدوء الغرفة يبقى: انقضاء المقطع لا يوقف هدوء الغرفة.
             self.state = ContentState.IDLE
             return ContentDecision(
                 action=ContentAction.FINISHED,
@@ -411,7 +418,7 @@ class ContentEngine:
             self.state = ContentState.IDLE
             return ContentDecision(reason=f"{label}: لا مقطع متاح", state=self.state)
 
-        self._start(clip, window_key, now)
+        self._start(clip, window_key, now, ts)
         self.state = ContentState.PLAYING
         return ContentDecision(
             action=ContentAction.START,
@@ -445,13 +452,29 @@ class ContentEngine:
         minutes = (now - prev).total_seconds() / 60.0
         return minutes >= self.config.content_min_gap_min
 
-    def _start(self, clip, window_key: str, now: datetime) -> None:
+    def _start(
+        self, clip, window_key: str, now: datetime, ts: Optional[float] = None
+    ) -> None:
+        """
+        يبدأ المقطع، ويبذر مؤقّت هدوء الغرفة.
+
+        `ts` بطابع الإطار (ساعة الحائط)، لا `now` (ساعة الطلب). الفرق
+        ليس شكلاً: `quiet_for` تُحسب بـ ts في كل موضع آخر من الوحدة،
+        فبذرة من ساعة أخرى تجعل كل فرق زمني فيها خاطئاً بمقدار
+        إزاحة المحاكاة كاملة. والحقل لا يُصحَّح إلا حين يصير None،
+        فالبذرة الخاطئة تعيش بقية اليوم: إزاحة موجبة تمنع كل نافذة
+        لاحقة، وسالبة تتخطّى نافذة الهدوء كلها.
+
+        السقوط على `now` عند غياب ts لا يحدث من المسار الحيّ: مُستدعى
+        مرّتين، وكلتاهما تملك طابعاً. وهو احتياط لو استُدعي `_start`
+        برمز ثالث في المستقبل.
+        """
         self._clip = clip
         self._window_key = window_key
         self._position_sec = 0.0
         self._postpones = 0
         # نبدأ العدّ من هذه اللحظة: البدء يحتاج نافذة هدوء من الآن
-        self._room_quiet_since = now.timestamp()
+        self._room_quiet_since = now.timestamp() if ts is None else ts
         self._log_id = self.store.log_start(
             clip["id"], window_key, now.isoformat(timespec="seconds")
         )

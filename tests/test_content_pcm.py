@@ -5,6 +5,7 @@
 وماذا يحدث حين تتكرّر. تحليل PCM نفسه له فحوصه في test_desktop.
 """
 
+import json
 import struct
 import sys
 import tempfile
@@ -434,6 +435,61 @@ try:
             f"shown {seen[-1] if seen else None} manual {app.manual_db.get()}",
         )
         app._log = real_log
+
+
+        # ===== 7) النبضة والمحرك متوقف =====
+        # cmd لا يُسنَد إلا داخل `if self.running:`، و_content_tick outside.
+        # التطبيق يستدعي _tick عند الإقلاع قبل أن يضغط المستخدم «ابدأ» أصلا،
+        # فكان يرتفع UnboundLocalError في أوّل نبضة من عمره - وفي كل نبضة
+        # بعد الإيقاف. والابتلاع في catch يبتلعه، فالمجموعة تبقى خضراء.
+        #
+        # الأثر الأعمق: الاستثناء كان يخرج من _tick قبل سطرَي
+        # _update_sim_readout و_maybe_save_settings، فلا تُحفظ الإعدادات إلا
+        # بعد الضغط على «ابدأ».
+        app.running = False
+        app._pcm_seq_used = -1
+        app._scenario_until = 0.0
+        stopped_logs = []
+        _real_log2 = app._log
+        app._log = lambda m: (stopped_logs.append(str(m)), _real_log2(m))[1]
+        seen.clear()
+        for _ in range(6):
+            app._tick()
+        tick_errors = [m for m in stopped_logs if "خطأ في النبضة" in m]
+        check("tick: no error while the engine is stopped",
+              tick_errors == [],
+              tick_errors[:1])
+        check("tick: the engine really was stopped", app.running is False)
+        check("tick: the content readout still refreshes",
+              hasattr(app, "content_title") and app.content_position.get() != "",
+              app.content_position.get())
+
+        # الحفظ مؤجَّل SAVE_EVERY_TICKS نبضة، فنمضي بما يتجاوزه.
+        # الاستثناء كان يخرج من _tick قبل هذا السطر في كل نبضة
+        # يكون فيها المحرك متوقفاً - أي أن الإعدادات لا تُحفظ
+        # إطلاقاً قبل الضغط على «ابدأ».
+        saved_path = tmp / "settings.json"
+        if saved_path.exists():
+            saved_path.unlink()
+        app.manual_db.set(33.0)
+        for _ in range(30):
+            app._tick()
+        saved = (
+            json.loads(saved_path.read_text(encoding="utf-8"))
+            if saved_path.exists()
+            else {}
+        )
+        check(
+            "tick: settings are saved while the engine is stopped",
+            saved.get("master_vol") is not None,
+            sorted(saved),
+        )
+        check(
+            "tick: still no error across 30 stopped ticks",
+            not [m for m in stopped_logs if "خطأ في النبضة" in m],
+            stopped_logs[:1],
+        )
+        app._log = _real_log2
 
         app.stop()
         app._on_close()
