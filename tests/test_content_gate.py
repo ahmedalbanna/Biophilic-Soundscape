@@ -202,8 +202,14 @@ tmp, engine, store, cfg = build()
 clock = new_clock()
 step(engine, clock, 13.0)
 check("prayer: content is running first", engine.content.is_running is True)
-# ندخل نافذة الصلاة: المحرك يعرض وقتاً في بالمغرب
-cmd, seen, at = step(engine, clock, 1.0, now=datetime(2026, 9, 30, 18, 10, 0))
+# ندخل نافذة الصلاة. الوقت 17:20 يقع داخل نافذة المغرب
+# (كتم 17:07 → قفل 17:45 بالأوقات الافتراضية).
+#
+# كان 18:10، وهو الوقت بين النافذتين: قفل المغرب 17:45 ينتهي،
+# وكتم العشاء يبدأ 18:27. لا كتم هناك، فكان المحرك مُحقّاً
+# والفشل من التوقّع لا من المنطق. أي أن «18:10» ليس خطأ في
+# الفهم - وقد يُقرأ خطأً.
+cmd, seen, at = step(engine, clock, 1.0, now=datetime(2026, 9, 30, 17, 20, 0))
 check(
     "prayer: the background is muted",
     cmd.state == EngineState.PRAYER_MUTED,
@@ -264,10 +270,16 @@ done(tmp, store)
 # ===== 5) فترة بلا نافذة محتوى =====
 tmp, engine, store, cfg = build()
 clock = new_clock()
+# 19:00 داخل نافذة العشاء (كتم 18:27 → قفل 19:05). الحالة
+# المتوقَّعة PRAYER_MUTED لا DAILY_AMBIENT: الاسم «بلا نافذة»
+# يعني لا نافذة *محتوى*، لا لا صلة بالصلاة. ومواصفة المشروع
+# «الصلاة تبقى مغلقة على كل شيء» (content-track.md §4.3)،
+# فالكتم عبر PRAYER_MUTED هو الصحيح - ولو كان DAILY_AMBIENT
+# لكان قد مرّ دون كتم.
 cmd, seen, at = step(engine, clock, 20.0, now=datetime(2026, 9, 30, 19, 0, 0))
 check(
     "no window: maghrib_isha mutes the background",
-    cmd.state == EngineState.DAILY_AMBIENT and cmd.is_muted,
+    cmd.state == EngineState.PRAYER_MUTED and cmd.is_muted,
     f"{cmd.state.value} muted={cmd.is_muted}",
 )
 check(
