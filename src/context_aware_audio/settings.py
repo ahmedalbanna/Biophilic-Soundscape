@@ -29,9 +29,15 @@ DEFAULTS = {
     "content_muted": False,
     "content_volume": 0.85,
     "content_library_dir": "",
-    # سحب المحتوى من الخادم: فارغ = المزامنة معطّلة
-    "content_sync_url": "",
-    "content_sync_token": "",
+    # سحب المحتوى من الخادم. عنوان مُثبَّت حتى يعمل heartbeat بلا
+    # إعداد يدوي؛ والمزامنة تبقى معطّلة إن كان الحقل فارغاً.
+    #
+    # تنبيه: بلا TLS، والرمز يمرّ نصّياً صريحاً. العنوان عام على
+    # الإنترنت، فأي قارئ للشبكة يرى `dev-token` على المسار. خلف
+    # NAT في المنزل مقبول؛ على شبكة غير موثوقة غيّر الرمز وأضف
+    # شهادة.
+    "content_sync_url": "http://185.190.140.93:8787",
+    "content_sync_token": "dev-token",
     "content_sync_max_parts": 20,
 }
 
