@@ -41,6 +41,10 @@ class RealPlayer:
         self.backend = "log"
         self.master_volume = 1.0
         self.master_muted = False
+        # mixer.music مسار أحادي: إما للخلفية وإما للمحتوى. يرفعه هذا
+        # العلم عند اللجوء في _pg_crossfade، فيعرف مشغّل المحتوى أن
+        # المسار مشغول بدل أن يبثّ فوق خلفية متقاطعة.
+        self.music_claimed = False
         self.eq_gain = 1.0
         self._lock = threading.Lock()
         self._scaled_cache = {}
@@ -198,8 +202,11 @@ class RealPlayer:
                 old_ch.stop()
         except (AttributeError, TypeError):
             # بعض بناء pygame لا تدعم Channel ككائن - نعود إلى music.
-            # لا نبتلع أخطاء الأصول هنا: music.load لا ترمي على ملف تالف،
-            # فابتلاعها كان يحوّل "لم يعمل" إلى "PLAY" صامت.
+            # لا نبتلع أخطاء الأصول هنا. (تعليق سابق ادّعى أن music.load
+            # لا ترمي على ملف تالف؛ الفحص أظهر أنها ترمي pygame.error
+            # للملف الناقص والتالف معاً، فالسكوت هنا كان سيحسم.)
+            # music محجوز للخلفية الآن: مسار المحتوى لا يمكنه استخدامه.
+            self.music_claimed = True
             self._pg.mixer.music.load(str(assets_dir() / name))
             self._pg.mixer.music.set_volume(vol)
             self._pg.mixer.music.play(loops=-1, fade_ms=max(0, fade_ms))
@@ -316,10 +323,13 @@ class RealPlayer:
                 if self._pg is not None:
                     self._ramp_gen += 1
                     self._fadeout_all(400)
-                    try:
-                        self._pg.mixer.music.stop()
-                    except Exception:
-                        pass
+                    if self.music_claimed:
+                        # music لنا هنا. نوقفه الخلفية أثناء تشغيل
+                        # المحتوى فتنقطع السرد بلا سبب ظاهر.
+                        try:
+                            self._pg.mixer.music.stop()
+                        except Exception:
+                            pass
             except Exception:
                 pass
             self._play_loop_winsound(None)
