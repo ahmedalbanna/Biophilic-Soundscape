@@ -68,7 +68,7 @@ try:
     check(
         "sim7: the pause precedes the resume",
         # لا index() بلا فحص présence: غياب الإجراء يرفع استثناءً
-        # يوقف الملف، و读取 نتيجة الفحصين السابقين لا يُطبع أبداً.
+        # يوقف الملف، ونتيجة الفحصين السابقين لا تُطبع أبداً.
         "pause" in acts
         and "resume" in acts
         and acts.index("pause") < acts.index("resume"),

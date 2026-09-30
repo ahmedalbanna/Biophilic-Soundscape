@@ -67,9 +67,9 @@ def parse_name(filename: str, window_keys: List[str]) -> Tuple[str, Optional[int
     """
      يفكّ اسم الملف إلى (نافذة، تسلسل، عنوان).
 
-    _unknown prefix or missing window falls back to the default window:
-     a file the user dropped in without a prefix should still be playable,
-     just not in a window they chose.
+    بادئة غير معروفة أو نافذة مفقودة تعود إلى النافذة الافتراضية:
+    ملف ألقيه المستخدم بلا بادئة يبقى قابلاً للتشغيل، لكن ليس في
+    نافذة اختارها.
     """
     stem = Path(filename).stem
     match = _NAME_RE.match(stem)

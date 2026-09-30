@@ -1084,6 +1084,21 @@ try:
             from src.context_aware_audio.app import DesktopApp
 
             _app2 = DesktopApp(_root2, log_path=None)
+            _app2 = DesktopApp(_root2, log_path=None)
+            # المواقيت تُثبَّت على ساعة المحاكاة. الفحص يدّعي أن
+            # 18:10 تُكتم للمغرب، فذلك يفترض المغرب عند 18:10 — ولم
+            # يكن ذلك من كاش Aladhan الحقيقي، وقد لا يقع. والأوقات
+            # الأخرى بعيدة عن 02:00 و15:00 اللذين يمرّ بهما الفحص،
+            # حتى لا يبتلعهما قفل صلاة فيتغيّر ما يُفحص.
+            _app2.engine.prayer.set_times(
+                {
+                    "fajr": dtime(5, 10),
+                    "dhuhr": dtime(12, 5),
+                    "asr": dtime(15, 25),
+                    "maghrib": dtime(18, 10),
+                    "isha": dtime(19, 30),
+                }
+            )
             _app2.manual_db.set(2.0)
             _app2.start()
             for _ in range(6):
@@ -1475,9 +1490,7 @@ finally:
 # ============ 25) presets عمق الخفض + تصفير حالة السيناريو ============
 _pres_home = tempfile.mkdtemp()
 try:
-    with mock.patch.object(
-        settings, "writable_path", lambda n: Path(_pres_home) / n
-    ):
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_pres_home) / n):
         _r7 = tk.Tk()
         _r7.withdraw()
         try:
@@ -1488,48 +1501,86 @@ try:
             )
 
             _a7 = DesktopApp(_r7, log_path=None)
-            check("presets: three depths are offered", len(DUCK_PRESETS) == 3,
-                  DUCK_PRESETS)
-            check("presets: none promises 90%",
-                  all(d < 90.0 for d in DUCK_PRESETS), DUCK_PRESETS)
-            check("presets: every depth is labelled",
-                  all(d in DUCK_PRESET_LABELS for d in DUCK_PRESETS),
-                  DUCK_PRESET_LABELS)
+            check(
+                "presets: three depths are offered",
+                len(DUCK_PRESETS) == 3,
+                DUCK_PRESETS,
+            )
+            check(
+                "presets: none promises 90%",
+                all(d < 90.0 for d in DUCK_PRESETS),
+                DUCK_PRESETS,
+            )
+            check(
+                "presets: every depth is labelled",
+                all(d in DUCK_PRESET_LABELS for d in DUCK_PRESETS),
+                DUCK_PRESET_LABELS,
+            )
             check("presets: the scale exists", hasattr(_a7, "duck_depth"))
-            check("presets: the scale feeds the engine config",
-                  _a7.config.duck_depth == _a7.duck_depth.get(),
-                  (_a7.config.duck_depth, _a7.duck_depth.get()))
+            check(
+                "presets: the scale feeds the engine config",
+                _a7.config.duck_depth == _a7.duck_depth.get(),
+                (_a7.config.duck_depth, _a7.duck_depth.get()),
+            )
 
             _a7._on_duck_preset(80.0)
-            check("presets: choosing a depth updates the engine",
-                  abs(_a7.config.duck_depth - 80.0) < 1e-9, _a7.config.duck_depth)
-            check("presets: the derived max cut follows",
-                  abs((1 - _a7.engine.duck_max_ratio()) * 100 - 80.0) < 0.01,
-                  _a7.engine.duck_max_ratio())
-            check("presets: the depth is in the snapshot",
-                  _a7._settings_snapshot()["duck_depth"] == 80.0)
+            check(
+                "presets: choosing a depth updates the engine",
+                abs(_a7.config.duck_depth - 80.0) < 1e-9,
+                _a7.config.duck_depth,
+            )
+            check(
+                "presets: the derived max cut follows",
+                abs((1 - _a7.engine.duck_max_ratio()) * 100 - 80.0) < 0.01,
+                _a7.engine.duck_max_ratio(),
+            )
+            check(
+                "presets: the depth is in the snapshot",
+                _a7._settings_snapshot()["duck_depth"] == 80.0,
+            )
             _a7._on_duck_preset(60.0)
-            check("presets: switching back works",
-                  abs(_a7.config.duck_depth - 60.0) < 1e-9, _a7.config.duck_depth)
+            check(
+                "presets: switching back works",
+                abs(_a7.config.duck_depth - 60.0) < 1e-9,
+                _a7.config.duck_depth,
+            )
 
             # زر السيناريو يصفّر الحالة المثبّتة
+            #
+            # الصلاة تُعطَّل لهذه الفحوص. بدونها كان الفحص يقرأ
+            # المواقيت الحقيقية المخزّنة وساعة الحائط، فيبتلع قفل الصلاة
+            # كل ضغطة سيناريو بين الأذان و«+20+15 دقيقة» بعده، فلا
+            # يُثبَّت الخفوت ويفشل الفحص بحسب ساعة التشغيل. ولا إصلاح
+            # ذلك بمواقيت ثابتة ممكن: أي مجموعة أوقات تترك نافذة كل
+            # يوم لا يغطّيها أي اختيار ثابت. وهذا فحصٌ عن تثبيت الزر
+            # لا عن الصلاة، والصلاة لها فحوصها في مواضعها.
+            _prayer_patch = mock.patch.object(
+                _a7.engine.prayer, "check", return_value=(False, "")
+            )
+            _prayer_patch.start()
             _a7.manual_db.set(30.0)
             _a7.start()
             for _ in range(5):
                 _r7.update()
                 _time.sleep(0.1)
             _a7._scenario("debate")
-            check("scenario: debate latches the mute",
-                  _a7.engine._in_debate_mute is True)
+            check(
+                "scenario: debate latches the mute", _a7.engine._in_debate_mute is True
+            )
             _a7._scenario("talk")
-            check("scenario: the next button clears the latch",
-                  _a7.engine._in_debate_mute is False,
-                  _a7.engine._in_debate_mute)
+            check(
+                "scenario: the next button clears the latch",
+                _a7.engine._in_debate_mute is False,
+                _a7.engine._in_debate_mute,
+            )
             _a7._scenario("debate")
             _a7._scenario("silence")
-            check("scenario: silence also clears the latch",
-                  _a7.engine._in_debate_mute is False)
+            check(
+                "scenario: silence also clears the latch",
+                _a7.engine._in_debate_mute is False,
+            )
             _a7.stop()
+            _prayer_patch.stop()
         finally:
             try:
                 _r7.destroy()

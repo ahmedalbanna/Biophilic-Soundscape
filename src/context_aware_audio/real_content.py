@@ -61,7 +61,7 @@ class RealContentPlayer:
             self.unavailable = ContentBackendUnavailable(
                 "claimed",
                 "الخلفية استعملت mixer.music للعبور المتقاطع - "
-                "الخلفية استعملت mixer.music للعبور المتقاطع - "
+                "المسار محجوز ولا بديل للمحتوى على هذا الجهاز"
             )
             return
         try:

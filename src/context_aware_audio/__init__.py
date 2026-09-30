@@ -3,7 +3,7 @@ Context-Aware Audio Engine - Yemeni Cultural Edition
 محرك الصوت التكييف للسياق - النسخة اليمنية
 
 الاستيراد من هذه الحزمة لا يُحمّل أي مكتبات صوتية: المشغّل والميكروفون
-متاحان بتحميل كسول (lazy import) عبر __getattr__ بالأسفل.
+متاحان بتحميل كسول عبر __getattr__ بالأسفل.
 """
 
 import importlib

@@ -15,6 +15,7 @@ from src.context_aware_audio import settings
 from src.context_aware_audio.content_library import ContentLibrary
 from src.context_aware_audio.content_store import ContentStore
 from src.context_aware_audio.real_content import RealContentPlayer
+from src.context_aware_audio.real_player import RealPlayer
 
 PASSED = FAILED = 0
 STEP = 0.2
@@ -307,6 +308,58 @@ try:
         )
         app.content.store = store
         app2_store.close()
+
+
+        # ===== 12) سبب التعطّل يصل إلى اللوحة =====
+        # _init_content يعدّ ثلاثة أسباب تعطّل ولا يعرضها: لا عنصر واجهة يقرأ
+        # _content_error. فقاعدة تالفة أو mixer.music محجوز كان يترك لوحةً
+        # صامتة لا تعمل ولا تشرح - وهو ما يعد به توثيق _init_content.
+        check("panel: the error label exists", hasattr(app, "_content_error_label"))
+        check("panel: the error text variable exists", hasattr(app, "content_error_text"))
+
+        # مسار حجز المسار: الخلفية رفعت علمها، فلا مشغّل محتوى
+        claimed = RealPlayer()
+        claimed.music_claimed = True
+        from src.context_aware_audio.real_content import RealContentPlayer as _RCP
+
+        _guarded = _RCP(lib, background=claimed)
+        app._set_content_error(_guarded.unavailable.reason)
+        check("panel: the reason is stored", bool(app._content_error))
+        check("panel: the reason is shown", app.content_error_text.get() != "",
+              repr(app.content_error_text.get()))
+        check("panel: and it names the actual cause",
+              "mixer.music" in app.content_error_text.get(),
+              app.content_error_text.get())
+        # cget يعيد اسم متغيّر تكل (PY_VARnn) لا كائن بايثون،
+        # فنقارن بالاسم المحوَّل.
+        _tcl_name = str(app.content_error_text)
+        check("panel: the label renders that variable",
+              app._content_error_label.cget("textvariable") == _tcl_name,
+              app._content_error_label.cget("textvariable"))
+        # فتح قاعدة تالفة
+        app._set_content_error("تعذّر فتح قاعدة المحتوى: الملف تالف")
+        check("panel: a corrupt store is explained too",
+              "قاعدة" in app.content_error_text.get(), app.content_error_text.get())
+
+        # الإخفاء عند النجاح: سبب زال يجب أن يختفي سطره
+        app._set_content_error("")
+        check("panel: clearing the reason clears the label",
+              app.content_error_text.get() == "", repr(app.content_error_text.get()))
+
+        # الفحص الارتدادي: على شيفرة قبل الإصلاح لا يقرأ أي عنصر واجهة
+        # هذا الحقل، فالسطر غير موجود أصلاً.
+        _tcl_name = str(app.content_error_text)
+        _label_vars = set()
+        for _child in app._content_error_label.master.winfo_children():
+            try:
+                _label_vars.add(str(_child.cget("textvariable")))
+            except Exception:
+                pass
+        check(
+            "panel: the label is wired, not decorative",
+            _tcl_name in _label_vars,
+            sorted(t for t in _label_vars if t),
+        )
 
         app.stop()
         app._on_close()

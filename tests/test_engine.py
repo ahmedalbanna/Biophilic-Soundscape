@@ -793,21 +793,49 @@ def noisy_engine(floor_db=30.0):
 
 _e, _v, _cfg, _t = noisy_engine()
 _thr = _v.speech_threshold()
+_max_r = _e.duck_max_ratio()
+_min_r = _e.duck_min_ratio()
 check("curve: the noisy-room threshold is 42", _thr == 42.0, _thr)
 check(
     "curve: max reduction sits exactly at the threshold",
-    abs(_e._duck_ratio(_thr, _thr) - _cfg.ducking_max_ratio) < 1e-9,
-    _e._duck_ratio(_thr, _thr),
+    abs(_e._duck_ratio(_thr, _thr) - _max_r) < 1e-9,
+    f"{_e._duck_ratio(_thr, _thr)} مقابل {_max_r}",
 )
 check(
     "curve: the curve does not start below speech",
-    abs(_e._duck_ratio(_thr - 2, _thr) - _cfg.ducking_max_ratio) < 1e-9,
-    _e._duck_ratio(_thr - 2, _thr),
+    abs(_e._duck_ratio(_thr - 2, _thr) - _max_r) < 1e-9,
+    f"{_e._duck_ratio(_thr - 2, _thr)} مقابل {_max_r}",
 )
 check(
     "curve: 64.9dB is essentially the minimum",
-    abs(_e._duck_ratio(64.9, _thr) - _cfg.ducking_min_ratio) < 0.002,
-    _e._duck_ratio(64.9, _thr),
+    abs(_e._duck_ratio(64.9, _thr) - _min_r) < 0.002,
+    f"{_e._duck_ratio(64.9, _thr)} مقابل {_min_r}",
+)
+
+# النسب تُشتقّ من duck_depth لا من حقل مستقل. الفحص يبني محرّكين
+# بعمقين مختلفين ويطالب بأن تتغيّر النسبة بينهما — وهو ما لا يراه
+# فحصٌ يقارن رقمين ثابتين يبقيان متطابقين عند الافتراضي وحده.
+_m60, _v60, _c60, _t60 = noisy_engine()
+_c60.duck_depth = 60.0
+_m60 = ContextAwareAudioEngine(_c60)
+_m80, _v80, _c80, _t80 = noisy_engine()
+_c80.duck_depth = 80.0
+_m80 = ContextAwareAudioEngine(_c80)
+check(
+    "curve: ducking_max_ratio() follows duck_depth",
+    _m60.duck_max_ratio() > _m80.duck_max_ratio(),
+    f"عمق 60: {_m60.duck_max_ratio():.3f} | عمق 80: {_m80.duck_max_ratio():.3f}",
+)
+check(
+    "curve: ducking_min_ratio() follows duck_depth too",
+    _m60.duck_min_ratio() > _m80.duck_min_ratio(),
+    f"عمق 60: {_m60.duck_min_ratio():.3f} | عمق 80: {_m80.duck_min_ratio():.3f}",
+)
+check(
+    "curve: the depth field is the only knob",
+    abs(_m60.duck_max_ratio() - (1.0 - 60.0 / 100.0)) < 1e-9
+    and abs(_m80.duck_max_ratio() - (1.0 - 80.0 / 100.0)) < 1e-9,
+    f"{_m60.duck_max_ratio():.3f} / {_m80.duck_max_ratio():.3f}",
 )
 
 # المحرك يمرّر العتبة الحيّة لا قيمة الإعدادات الثابتة
@@ -821,8 +849,8 @@ for _ in range(4):
     _t2b += STEP
 check(
     "curve: the engine uses the live threshold, not the config constant",
-    abs(_c.volume_ratio - _cfg2.ducking_max_ratio) < 1e-6,
-    f"{_c.volume_ratio} vs {_cfg2.ducking_max_ratio}",
+    abs(_c.volume_ratio - _e2.duck_max_ratio()) < 1e-6,
+    f"{_c.volume_ratio} vs {_e2.duck_max_ratio()}",
 )
 check(
     "curve: speaking at the threshold is ducked",

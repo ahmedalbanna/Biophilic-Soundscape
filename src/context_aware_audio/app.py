@@ -256,6 +256,7 @@ class DesktopApp:
         self._content_library = None
         self.content_player = None
         self._content_error = ""
+        self.content_error_text = tk.StringVar(value="")
         self.content_library_path = content_library_dir(
             str(self._settings.get("content_library_dir", ""))
         )
@@ -597,7 +598,7 @@ class DesktopApp:
         try:
             self._content_store = ContentStore(user_data_dir() / "content.db")
         except Exception as exc:
-            self._content_error = f"تعذّر فتح قاعدة المحتوى: {exc}"
+            self._set_content_error(f"تعذّر فتح قاعدة المحتوى: {exc}")
             self._content_store = None
             return
         self.engine.content.store = self._content_store
@@ -609,11 +610,24 @@ class DesktopApp:
                 self.content_library_path, background=self.player
             )
         except Exception as exc:
-            self._content_error = f"تعذّر تهيئة مشغّل المحتوى: {exc}"
+            self._set_content_error(f"تعذّر تهيئة مشغّل المحتوى: {exc}")
             self.content_player = None
             return
         if not self.content_player.available:
-            self._content_error = self.content_player.unavailable.reason
+            self._set_content_error(self.content_player.unavailable.reason)
+
+    def _set_content_error(self, reason: str = "") -> None:
+        """
+        يضع سبب تعطّل المحتوى في المتغيّر الذي تقرؤه اللوحة.
+
+        الحقل وحده كان عديمة الأثر: كُتبت فيه ثلاثة أسباب ولا تقرأها
+        ولا عنصر واجهة واحد. فقاعدة تالفة أو مسار مشغول كان يترك
+        لوحةً لا تعمل ولا تفسّر شيئاً - وهو بالضبط ما يعد به توثيق
+        _init_content.
+        """
+        self._content_error = reason
+        if hasattr(self, "content_error_text"):
+            self.content_error_text.set(reason)
 
     def _content_ready(self) -> bool:
         return self._content_library is not None and self.content is not None
@@ -832,6 +846,20 @@ class DesktopApp:
             foreground="#666",
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
+
+        # سبب التعطّل: _init_content يعدّه ولا يعرضه، فقاعدة تالفة أو
+        # مسار محجوز كان يُترك لوحةً صامتة لا تعمل ولا تشرح. يظهر
+        # مرة واحدة ويبقى ظاهراً ما دام السبب قائماً - الإخفاء عند
+        # النجاح يوحي بأن العطل عاد ليحلّ محلّه.
+        self._content_error_label = ttk.Label(
+            box,
+            textvariable=self.content_error_text,
+            font=("Segoe UI", 8, "bold"),
+            foreground="#a03000",
+            justify="left",
+            wraplength=520,
+        )
+        self._content_error_label.pack(anchor="w", pady=(6, 0))
         return box
 
     def _log(self, msg: str):

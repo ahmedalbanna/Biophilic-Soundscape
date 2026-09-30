@@ -347,7 +347,7 @@ try:
             app.mic._pcm = block
             app.mic._pcm_seq = 13
         app._pcm_error_logged = False
-        # نحفظ الاستثناء بدل letting it fly. لو لم يُعزل العطل لخرج
+        # نحفظ الاستثناء بدل أن يخرج. لو لم يُعزل العطل لخرج
         # من _analyze_tick_frame وكسر الملف كله - وهو خطأ يُقرأ في
         # الفحص كمرور: والملف يموت قبل أن يُطبع حاصل.
         escaped = None

@@ -76,7 +76,7 @@ with ContentStore(db) as s:
     nxt = s.next_for_window("maqil_story")
     check("seq: advances past a completed story", nxt["id"] == "story_b", nxt["id"])
 
-    # ---故事的未结束的不应推进 ---
+    # --- قصة لم تنتهِ بعد لا يجوز أن يتقدّم التسلسل ---
     s.log_start("story_b", "maqil_story", "2026-09-30T15:00:00")
     nxt = s.next_for_window("maqil_story")
     check(
