@@ -5,8 +5,8 @@ service.py - المتحكّم بلا واجهة
 صفحة ويب) طبقة عرض فوق هذا: تقرأ `state()` وتستدعي الأوامر.
 
 لماذا الوحدة: المنطق كان موزّعاً بين 1691 سطراً فيها متغيّرات
-Tk，随时 «تُقرَأ» من想吃 وسم، وسمٌ لا وجود له قبل أن تبنيه الواجهة.
-فالفحص كان يحتاج Tk ليختبر منطقاً لا علاقة له بـ Tk، وستة ملفات
+Tk تُقرَأ من عناصر الواجهة، وعنصرٌ لا وجود له قبل أن تبنيه الواجهة.
+فالفحص كان يحتاج Tk ليختبر منطقاً لا علاقة له به، وستة ملفات
 اختبار كانت تُنشئ نافذة.
 
 قاعدة صارمة: هذا الملف لا يستورد tkinter ولا يعرف существова.
@@ -622,26 +622,24 @@ class AudioService:
         return "يحدّث المواقيت"
 
     def _drain_prayer_queue(self):
+        """يطبّق ما جاء من خيط الجلب، ويصفّر الطابور."""
         while True:
             try:
                 kind, payload = self._prayer_queue.get_nowait()
             except queue.Empty:
                 return
             if kind == "ok":
-                # PrayerTimes NamedTuple فيه times و source. تمرير
-                # الكائن كله إلى set_times يجعله يتوقّع قاموساً.
+                # كائن المواقيت مُجمَّع فيه حقلان: المواعيد ومصدرها.
+                # تمريره كله إلى set_times يجعله يتوقّع قاموساً.
                 self.engine.prayer.set_times(payload.times)
                 self._prayer_date = datetime.now().date()
                 self._prayer_error = ""
                 self.log(f"مواقيت الصلاة: من {payload.source}")
                 if payload.times:
-                    self.log(
-                        "  "
-                        + " · ".join(
-                            f"{k}={v.strftime('%H:%M')}"
-                            for k, v in payload.times.items()
-                        )
-                    )
+                    self.log("  " + " · ".join(
+                        f"{k}={v.strftime('%H:%M')}"
+                        for k, v in payload.times.items()
+                    ))
             else:
                 self._prayer_error = str(payload)
                 self.log(f"تعذّر جلب المواقيت: {payload} — استُخدمت التقديرية")
