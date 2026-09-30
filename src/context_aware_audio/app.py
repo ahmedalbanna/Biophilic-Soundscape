@@ -222,6 +222,9 @@ class DesktopApp:
         self._athan_played: set = set()
         self._scenario_until = 0.0
         self._scenario_db_value = 0.0
+        # رقم آخر كتلة PCM حللناها: يمنع حساب الصوت مرتين في النبضة
+        self._pcm_seq_used = -1
+        self._pcm_error_logged = False
         self.athan_enabled = tk.BooleanVar(
             value=bool(self._settings.get("athan_enabled", True))
         )
@@ -246,9 +249,7 @@ class DesktopApp:
         self.content_library = tk.StringVar(value="")
         self.content_volume_text = tk.StringVar(value="")
         self.config.content_enabled = self.content_enabled
-        self.config.content_volume = float(
-            self._settings.get("content_volume", 0.85)
-        )
+        self.config.content_volume = float(self._settings.get("content_volume", 0.85))
         # المخزن والمكتبة والمشغّل. أي فشل هنا لا يوقف التطبيق:
         # يعمل بالخلفية وحدها، واللوحة تشرح السبب.
         self._content_store = None
@@ -334,9 +335,7 @@ class DesktopApp:
             "content_enabled": bool(self.content_enabled),
             "content_muted": bool(self.content_muted.get()),
             "content_volume": self.config.content_volume,
-            "content_library_dir": str(
-                self._settings.get("content_library_dir", "")
-            ),
+            "content_library_dir": str(self._settings.get("content_library_dir", "")),
         }
 
     def _save_settings(self) -> bool:
@@ -516,9 +515,11 @@ class DesktopApp:
         self._on_duck_depth()
         label = DUCK_PRESET_LABELS.get(depth, f"{depth:.0f}%")
         self._log(f"عمق الخفض: {label}")
-        self._log(f"  أقصى خفض {depth:.0f}% عند حدّ الكلام، "
-                  f"و{100 - (1 - self.engine.duck_min_ratio()) * 100:.0f}% "
-                  f"عند 64dB")
+        self._log(
+            f"  أقصى خفض {depth:.0f}% عند حدّ الكلام، "
+            f"و{100 - (1 - self.engine.duck_min_ratio()) * 100:.0f}% "
+            f"عند 64dB"
+        )
 
     def _on_autostart(self):
         wanted = bool(self.autostart.get())
@@ -643,11 +644,7 @@ class DesktopApp:
             self.content_player.stop()
             self._update_content_readout()
             return
-        if (
-            eng is not None
-            and eng.is_running
-            and not self.content_player.is_playing
-        ):
+        if eng is not None and eng.is_running and not self.content_player.is_playing:
             # رفع الكتم: المشغّل فقد الملف عند الإيقاف، فاستئناف
             # بلا ملف لا يفعل شيئاً. نعيد التشغيل عند موضع المحرك،
             # وهو المرجع لا موضع الجهاز.
@@ -678,9 +675,7 @@ class DesktopApp:
         pct = 0.0
         if eng is not None and eng.is_running:
             if eng.duration_sec > 0:
-                pct = max(
-                    0.0, min(100.0, eng.position_sec * 100.0 / eng.duration_sec)
-                )
+                pct = max(0.0, min(100.0, eng.position_sec * 100.0 / eng.duration_sec))
             self.content_title.set(f"جارٍ: {eng.current_title}")
             self.content_state.set(CONTENT_STATE_LABELS.get(eng.state, eng.state))
             self.content_position.set(
@@ -785,7 +780,9 @@ class DesktopApp:
             side="left", padx=2
         )
         ttk.Checkbutton(
-            row, text="كتم المحتوى", variable=self.content_muted,
+            row,
+            text="كتم المحتوى",
+            variable=self.content_muted,
             command=self._on_content_mute,
         ).pack(side="left", padx=8)
         ttk.Label(
@@ -796,20 +793,26 @@ class DesktopApp:
         vrow.pack(fill="x", pady=(4, 2))
         ttk.Label(vrow, text="مستوى المحتوى:").pack(side="left", padx=(0, 4))
         ttk.Scale(
-            vrow, from_=0, to=100, orient="horizontal",
-            variable=self.content_volume, command=self._on_content_volume,
+            vrow,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.content_volume,
+            command=self._on_content_volume,
         ).pack(side="left", fill="x", expand=True)
 
         lib = ttk.Frame(box)
         lib.pack(fill="x", pady=(4, 0))
-        ttk.Button(
-            lib, text="إعادة فحص المكتبة", command=self._on_content_rescan
-        ).pack(side="left", padx=2)
-        ttk.Button(
-            lib, text="افتح المجلد", command=self._on_content_open
-        ).pack(side="left", padx=2)
+        ttk.Button(lib, text="إعادة فحص المكتبة", command=self._on_content_rescan).pack(
+            side="left", padx=2
+        )
+        ttk.Button(lib, text="افتح المجلد", command=self._on_content_open).pack(
+            side="left", padx=2
+        )
         ttk.Label(
-            lib, textvariable=self.content_library, font=("Segoe UI", 8),
+            lib,
+            textvariable=self.content_library,
+            font=("Segoe UI", 8),
             foreground="#555",
         ).pack(side="left", padx=8)
 
@@ -820,7 +823,9 @@ class DesktopApp:
                 " — مثال: maqil_story__001__story.mp3"
                 " والترتيب اختياري"
             ),
-            font=("Segoe UI", 8), foreground="#666", justify="left",
+            font=("Segoe UI", 8),
+            foreground="#666",
+            justify="left",
         ).pack(anchor="w", pady=(4, 0))
         return box
 
@@ -988,6 +993,49 @@ class DesktopApp:
                 return db
         return float(self.manual_db.get())
 
+    def _analyze_tick_frame(self, db: float, real_now: datetime):
+        """
+        يبني إطار النبضة، عبر PCM الحقيقي إن أمكن.
+
+        ثلاثة مسارات، بالترتيب:
+
+        1. سيناريو مثبَّت → `analyze_frame` حتماً. المسار المزروع ليس
+           صوتاً، فتمريره إلى محلّل PCM يجعله ينسب قراره لغرفة صامتة
+           ويبطل إبطالَ webrtcvad الذي وُضع أصلاً لصدّ الكلام الزائف.
+        2. كتلة PCM جديدة → `analyze_pcm`، وهو الطريق الوحيد الذي يمرّ
+           على webrtcvad حين يتوفّر.
+        3. غير ذلك → `analyze_frame` على الـ dB كما كان.
+
+        رقم الكتلة يمنع حساب الصوت مرتين في النبضة الواحدة: الطاقة
+        تُحسب من الكتلة نفسها مرتين فتحلّ نافذة البدء 0.2ث مرتين،
+        فيُؤكَّد كلامٌ بعد 0.1ث من أوله.
+        """
+        if self._scenario_db() is not None:
+            return self.vad.analyze_frame(db, timestamp=real_now.timestamp())
+        if not (self.use_mic.get() and self.mic.available):
+            return self.vad.analyze_frame(db, timestamp=real_now.timestamp())
+        pcm, seq = self.mic.read_pcm()
+        if not pcm or seq == self._pcm_seq_used:
+            # لا بيانات، أو نفس الكتلة التي حللناها في النبضة السابقة.
+            # إعادة تحليلها تجعل عدّاد التوقيت يظنّ أن الصوت يتقدّم
+            # وهو واقف.
+            self._pcm_seq_used = seq
+            return self.vad.analyze_frame(db, timestamp=real_now.timestamp())
+        self._pcm_seq_used = seq
+        try:
+            return self.vad.analyze_pcm(
+                pcm,
+                sample_rate=self.mic.sample_rate,
+                timestamp=real_now.timestamp(),
+            )
+        except Exception as exc:
+            # محلّل PCM معطّل لا يوقف النبضة: نرجع للطاقة ونكتب السبب
+            # مرة واحدة، لا في كل 200ms.
+            if not self._pcm_error_logged:
+                self._pcm_error_logged = True
+                self._log(f"تحليل PCM تعذّر، عُدنا للطاقة: {exc}")
+            return self.vad.analyze_frame(db, timestamp=real_now.timestamp())
+
     def _tick(self):
         """
         نبضة واحدة كل 200ms: تحدّث الواجهة وتغذّي المحرك بإطار صوتي.
@@ -1012,7 +1060,7 @@ class DesktopApp:
             db = self._current_db()
             self._apply_output_settings(now, db)
             # الطابع زمن حقيقي دائماً - هذا هو السطر المحوري.
-            auto = self.vad.analyze_frame(db, timestamp=real_now.timestamp())
+            auto = self._analyze_tick_frame(db, real_now)
             if self.greeting.get():
                 auto.is_greeting_tone = True
                 auto.is_speech = True
@@ -1032,9 +1080,15 @@ class DesktopApp:
                 else:
                     self._player_error_logged = False
                     self._player_error = ""
-                self._update_readouts(now, cmd, db, auto.is_speech, auto.is_speech_raw)
+                # القراءة تأخذ dB من الإطار لا من القياس قبله. على مسار
+                # PCM المستوى يُحسب داخل المحلّل، فقد يختلف عن القراءة
+                # الأولى بنفس الكتلة - والعدّاد الذي يعرض رقماً غير ما
+                # قرّره المحرك يعرض كذباً.
+                self._update_readouts(
+                    now, cmd, auto.db_level, auto.is_speech, auto.is_speech_raw
+                )
             else:
-                self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
+                self.db_label.config(text=f"dB: {auto.db_level:.0f} (المحرك متوقف)")
             self._content_tick(cmd, now)
             self._update_sim_readout(now, real_now)
             self._maybe_save_settings()

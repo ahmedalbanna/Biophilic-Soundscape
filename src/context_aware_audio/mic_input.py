@@ -30,6 +30,11 @@ class MicInput:
         self.available = False
         self.noise_floor_db: float | None = None
         self._db = 0.0
+        # آخر كتلة PCM خام: شرط تشغيل analyze_pcm. كتلة واحدة فقط،
+        # وما قبلها يُطرح - حفظ تاريخ هنا تسريب ذاكرة لا فائدة،
+        # فالمحلّل يحتاج اللحظة لا الأرشيف.
+        self._pcm = b""
+        self._pcm_seq = 0
         self._lock = threading.Lock()
         self._stream = None
         self._pyaudio = None
@@ -120,9 +125,12 @@ class MicInput:
     def _start_sounddevice(self) -> bool:
         def cb(indata, frames, time_info, status):
             # خيط صوتي: حساب بسيط فقط، بلا نسخ إضافية
-            db = self._pcm_to_db(bytes(indata))
+            raw = bytes(indata)
+            db = self._pcm_to_db(raw)
             with self._lock:
                 self._db = db
+                self._pcm = raw
+                self._pcm_seq += 1
 
         try:
             self._stream = self._sd.InputStream(
@@ -177,9 +185,12 @@ class MicInput:
             while not self._stop_flag:
                 try:
                     data = stream.read(1600, exception_on_overflow=False)
-                    db = self._pcm_to_db(bytes(data))
+                    raw = bytes(data)
+                    db = self._pcm_to_db(raw)
                     with self._lock:
                         self._db = db
+                        self._pcm = raw
+                        self._pcm_seq += 1
                 except Exception:
                     break
 
@@ -200,6 +211,20 @@ class MicInput:
             return None
         with self._lock:
             return float(self._db)
+
+    def read_pcm(self) -> tuple[bytes | None, int]:
+        """
+        آخر كتلة PCM مع رقمها التسلسلي، أو (None, 0) بلا بيانات.
+
+        الرقم جزء من الواجهة لا زينة: النبضة تقرأ الكتلة مرتين في
+        المشوار العادي (مرة لـ dB ومرة للمحلّل)، وبدون رقم تقرأ
+        الكتلة نفسها مرتين فيُحسب الصوت مرتين وتُطبَّق نافذة البدء
+        مرتين. المقارنة بالرقم تميّز «نفس الكتلة» عن «كتلة جديدة».
+        """
+        if not self.available or self._stream is None:
+            return None, 0
+        with self._lock:
+            return self._pcm, self._pcm_seq
 
     @staticmethod
     def list_devices() -> list:
@@ -278,6 +303,11 @@ class MicInput:
             pass
         finally:
             self._stream = None
+            # الكتلة الأخيرة تُمسح مع التيار: تحليل PCM فوق بيانات
+            # MicInput آخر تشغيل ينسب الصوتَ لغرفةٍ لم تعد تُسمع.
+            with self._lock:
+                self._pcm = b""
+                self._pcm_seq = 0
             self._join_reader()
             # مهم: _pa هو الكائن لا الوحدة. إنهاء الوحدة لا يُغلق منفذ
             # PortAudio، فكل تشغيل بلا إنهاء يعني مقبضاً مسرّباً.
