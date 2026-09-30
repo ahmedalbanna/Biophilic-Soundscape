@@ -29,3 +29,5 @@ context_audio.spec
 assets/_scaled/
 assets/settings.json
 assets/prayer_cache.json
+assets/*.log
+assets/*.tmp

@@ -7,9 +7,8 @@ settings.py - حفظ إعدادات سطح المكتب محلياً (JSON)
 """
 
 import json
-
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .paths import atomic_write, writable_path
 
@@ -78,7 +77,7 @@ def _as_device(value: Any) -> Optional[int]:
     return idx if idx >= 0 else None
 
 
-_COERCERS: dict = {
+_COERCERS: dict[str, Callable[[Any], Any]] = {
     "master_vol": lambda v: _as_float(v, DEFAULTS["master_vol"], 0.0, 100.0),
     "master_mute": lambda v: _as_bool(v, DEFAULTS["master_mute"]),
     "use_mic": lambda v: _as_bool(v, DEFAULTS["use_mic"]),
@@ -108,6 +107,8 @@ def load_settings() -> dict:
 
 def save_settings(data: dict) -> bool:
     """يحفظ الإعدادات بعد تنقيتها إلى المفاتيح المعروفة وكتابتها ذرّياً."""
+    if not isinstance(data, dict):
+        return False
     try:
         clean = {
             key: coerce(data.get(key, DEFAULTS[key]))

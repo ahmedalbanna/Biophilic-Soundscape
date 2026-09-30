@@ -7,6 +7,19 @@ import threading
 import time
 
 
+def _safe_terminate(obj) -> None:
+    """ينهي كائن PyAudio إن وُجد، دون أن يرمي استثناءً."""
+    if obj is None:
+        return
+    terminate = getattr(obj, "terminate", None)
+    if terminate is None:
+        return
+    try:
+        terminate()
+    except Exception:
+        pass
+
+
 class MicInput:
     """يلتقط الصوت من الميكروفون ويحوّله إلى مستوى dB."""
 
@@ -20,8 +33,9 @@ class MicInput:
         self._lock = threading.Lock()
         self._stream = None
         self._pyaudio = None
+        self._pa = None  # كائن PyAudio حيّ (ليس الوحدة)
+        self._thread = None
         self._stop_flag = True
-        self._last_pcm: bytes = b""
         self._sd = None
         self._detect_backend()
 
@@ -91,17 +105,24 @@ class MicInput:
         if self._stream is not None:
             return True
         if self.backend == "sounddevice":
-            return self._start_sounddevice()
+            if self._start_sounddevice():
+                return True
+            # sounddevice موجود لكن الجهاز مشغول/محجوز: جرّب pyaudio مرة
+            # واحدة قبل الاستسلام، فقد يكون هو البديل المتاح فعلاً.
+            if self._probe_pyaudio():
+                self.backend = "pyaudio"
+                return self._start_pyaudio()
+            return False
         if self.backend == "pyaudio":
             return self._start_pyaudio()
         return False
 
     def _start_sounddevice(self) -> bool:
         def cb(indata, frames, time_info, status):
+            # خيط صوتي: حساب بسيط فقط، بلا نسخ إضافية
             db = self._pcm_to_db(bytes(indata))
             with self._lock:
                 self._db = db
-                self._last_pcm = bytes(indata)
 
         try:
             self._stream = self._sd.InputStream(
@@ -122,6 +143,9 @@ class MicInput:
         try:
             pyaudio = self._ensure_pyaudio()
             pa = pyaudio.PyAudio()
+        except Exception:
+            return False
+        try:
             stream = pa.open(
                 format=pyaudio.paInt16,
                 channels=1,
@@ -130,8 +154,10 @@ class MicInput:
                 frames_per_buffer=1600,
             )
         except Exception:
-            self._stream = None
+            # فشل الفتح بعد إنشاء الكائن: يجب إنهاؤه وإلا تسرّب منفذ
+            _safe_terminate(pa)
             return False
+        self._pa = pa
         self._stream = stream
         self._stop_flag = False
 
@@ -142,7 +168,6 @@ class MicInput:
                     db = self._pcm_to_db(bytes(data))
                     with self._lock:
                         self._db = db
-                        self._last_pcm = bytes(data)
                 except Exception:
                     break
 
@@ -235,16 +260,21 @@ class MicInput:
                 self._stream.stop()
                 self._stream.close()
             elif self.backend == "pyaudio" and self._stream is not None:
-                self._stop_flag = True
                 self._stream.stop_stream()
                 self._stream.close()
         except Exception:
             pass
         finally:
             self._stream = None
-            if self._pyaudio is not None:
-                try:
-                    self._pyaudio.terminate()
-                except Exception:
-                    pass
-                self._pyaudio = None
+            self._join_reader()
+            # مهم: _pa هو *الكائن* لا الوحدة. إنهاء الوحدة لا يُغلق منفذ
+            # PortAudio، فكل تشغيل tanpa إنهاء = مقبض مسرّب.
+            _safe_terminate(self._pa)
+            self._pa = None
+            self._pyaudio = None
+
+    def _join_reader(self, timeout: float = 0.5) -> None:
+        """ينتظر خيط القراءة حتى لا ينافس خيط جديد بعد إعادة التشغيل."""
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)

@@ -5,6 +5,7 @@ paths.py - مسارات التطبيق الموحّدة
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 APP_DIR_NAME = "ContextAudio"
@@ -50,16 +51,27 @@ def atomic_write(path: Path, text: str) -> None:
 
     الكتابة المباشرة تُبقي الملف مقتطعاً إذا قُتلت العملية أثناءها، ثم
     يغذّي التنظيفَ التالي. الاستبدال ذرّي على NTFS.
-    """
-    import os
 
-    tmp = path.with_name(path.name + ".tmp")
+    اسم الملف المؤقت فريد (NamedTemporaryFile) لا ثابت: نسختان من التطبيق
+    تكتبان نفس الهدف، والنسخة الخاسرة كانت تحذف ملف الخاسرة.
+    """
+    tmp_name = None
     try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(text)
+            tmp_name = tmp.name
+        os.replace(tmp_name, path)
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp_name is not None:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
         raise

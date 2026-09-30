@@ -216,9 +216,10 @@ class RealPlayer:
                     try:
                         self._ramp_gen += 1
                         self._pg_crossfade(cmd.file, eff, fade_ms or 400)
-                    except Exception:
-                        pass
-                    action = f"PLAY {cmd.file} vol={eff:.0%}"
+                        action = f"PLAY {cmd.file} vol={eff:.0%}"
+                    except (OSError, ValueError) as e:
+                        # ملف ناقص أو تالف: نُبلغ بدل ادّعاء التشغيل
+                        action = f"PLAY-FAILED {cmd.file} ({e})"
                 else:
                     if abs(eff - self.current_volume) >= 0.01:
                         self._ramp_volume(
@@ -238,9 +239,12 @@ class RealPlayer:
                 key = (cmd.file, round(eff * 10) / 10)
                 current_key = (self.current_file, round(self.current_volume * 10) / 10)
                 if self.is_muted or current_key != key:
-                    if path is not None:
+                    if path is None:
+                        # الأصل غير موجود: لا شيء يعمل، ونقول ذلك
+                        action = f"PLAY-FAILED {cmd.file} (asset missing)"
+                    else:
                         self._play_loop_winsound(path)
-                    action = f"PLAY {cmd.file} vol={eff:.0%}"
+                        action = f"PLAY {cmd.file} vol={eff:.0%}"
                 else:
                     action = f"KEEP {cmd.file} vol={eff:.0%}"
                 self.current_file = cmd.file

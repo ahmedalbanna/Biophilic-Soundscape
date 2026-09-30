@@ -6,6 +6,7 @@ import json
 import struct
 import sys
 import tempfile
+import types
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -452,11 +453,14 @@ class _FakeStream:
 
 
 class _FakePA:
+    def __init__(self):
+        type(self).created += 1
+
     def open(self, **kw):
         return _FakeStream()
 
     def terminate(self):
-        pass
+        type(self).terminated += 1
 
     def get_device_count(self):
         return 2
@@ -467,16 +471,26 @@ class _FakePA:
 
 class _FakePyAudio(_FakePA):
     paInt16 = 8
+    created = 0
+    terminated = 0
 
 
 def _fake_pyaudio():
     mod = _types.ModuleType("pyaudio")
     mod.PyAudio = _FakePyAudio
     mod.paInt16 = 8  # ثابت على مستوى الوحدة كما في المكتبة الحقيقية
+    # الوحدة تحمل terminate أيضاً - هذا ما أخفى الخطأ سابقاً
+    mod.terminate = lambda: None
     return mod
 
 
+def _reset_pa_counters():
+    _FakePyAudio.created = 0
+    _FakePyAudio.terminated = 0
+
+
 with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    _reset_pa_counters()
     m2 = MicInput()
     m2._sd = None
     m2._pyaudio = sys.modules["pyaudio"]
@@ -493,6 +507,55 @@ with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
     devs = MicInput._devices_via_pyaudio()
     check("pyaudio: device listing works", len(devs) == 2, devs)
     check("pyaudio: device entries well formed", all(len(d) == 2 for d in devs), devs)
+    # تسريب مقابض PortAudio: كل PyAudio() يجب أن يُنهى عند stop
+    check(
+        "pyaudio: every handle terminated on stop",
+        _FakePyAudio.created == _FakePyAudio.terminated,
+        f"created={_FakePyAudio.created} terminated={_FakePyAudio.terminated}",
+    )
+    check("pyaudio: handles were actually created", _FakePyAudio.created >= 2)
+
+# فشل open بعد إنشاء الكائن يجب أن يُنهيه (لا تسرّب)
+_reset_pa_counters()
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    m2b = MicInput()
+    m2b._sd = None
+    m2b._pyaudio = sys.modules["pyaudio"]
+    m2b.backend = "pyaudio"
+    m2b.available = True
+    with mock.patch.object(_FakePA, "open", side_effect=OSError("busy")):
+        r2b = m2b.start()
+    check("pyaudio: open failure returns False", r2b is False)
+    check(
+        "pyaudio: failed open still terminates handle",
+        _FakePyAudio.created == 1 and _FakePyAudio.terminated == 1,
+        f"created={_FakePyAudio.created} terminated={_FakePyAudio.terminated}",
+    )
+
+# خيط القراءة: يُنظَّف ولا يتنافس مع خيط جديد
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    m2c = MicInput()
+    m2c._sd = None
+    m2c._pyaudio = sys.modules["pyaudio"]
+    m2c.backend = "pyaudio"
+    m2c.available = True
+    check("pyaudio: _thread initialised to None", m2c._thread is None)
+    m2c.start()
+    check("pyaudio: reader thread created", m2c._thread is not None)
+    m2c.stop()
+    check("pyaudio: reader thread cleared on stop", m2c._thread is None)
+
+# بديل عند تعذّر sounddevice
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    m2d = MicInput()
+    m2d.backend = "sounddevice"
+    m2d.available = True
+    m2d._sd = _types.SimpleNamespace(InputStream=_types.SimpleNamespace())
+    with mock.patch.object(m2d, "_start_sounddevice", return_value=False):
+        r2d = m2d.start()
+    check("mic: falls back to pyaudio when sounddevice fails", r2d is True, m2d.backend)
+    check("mic: backend switched to pyaudio", m2d.backend == "pyaudio", m2d.backend)
+    m2d.stop()
 
 # فشل التقاط عابر يجب ألّا يُعطّل الجهاز نهائياً
 with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
@@ -636,6 +699,134 @@ finally:
     import shutil
 
     shutil.rmtree(_ro, ignore_errors=True)
+
+# ============ 17) سيناريوهات: القيمة المعروضة = قيمة الإطار المزروع ============
+# كان _scenario_db() يرجع 75.0 ثابتة بينما الإطارات المزروعة 70/62/20/50
+import tkinter as _tk
+
+_root = _tk.Tk()
+_root.withdraw()
+try:
+    from src.context_aware_audio.app import DesktopApp
+
+    _app = DesktopApp(_root, log_path=None)
+    for kind, expected in (
+        ("debate", 70.0),
+        ("welcome", 62.0),
+        ("silence", 20.0),
+        ("talk", 50.0),
+    ):
+        _app._scenario(kind)
+        check(
+            f"scenario {kind}: pinned db == {expected:.0f}",
+            _app._scenario_db() == expected,
+            _app._scenario_db(),
+        )
+        check(
+            f"scenario {kind}: shown db == {expected:.0f}",
+            _app._current_db() == expected,
+            _app._current_db(),
+        )
+        _app._scenario_until = 0.0
+    check("scenario expires", _app._scenario_db() is None)
+    _app.stop()
+finally:
+    try:
+        _root.destroy()
+    except Exception:
+        pass
+
+# ============ 18) المشغّل: PLAY-FAILED بدل ادّعاء التشغيل ============
+
+
+def _boom(path):
+    raise OSError("missing wav")
+
+
+_miss_pg, _miss_sink = _make_fake_pygame()
+_miss_pg.mixer.Sound = _boom
+with mock.patch.dict(sys.modules, {"pygame": _miss_pg}):
+    pl3 = RealPlayer()
+    bad = PlaybackCommand(
+        file="does_not_exist.wav",
+        target_db=38,
+        volume_ratio=1.0,
+        fade_duration_sec=0.1,
+        state=EngineState.DAILY_AMBIENT,
+        reason="t",
+    )
+    out = pl3.apply(bad)
+    check("player reports PLAY-FAILED for missing asset", "PLAY-FAILED" in out, out)
+    pl3.stop()
+
+# مسار winsound: أصل مفقود يجب ألا يُعلن PLAY
+pl4 = RealPlayer()
+pl4._pg = None
+pl4._winsound = types.SimpleNamespace(PlaySound=lambda *a, **k: None)
+pl4.backend = "winsound"
+out4 = pl4.apply(bad)
+check("winsound reports PLAY-FAILED for missing asset", "PLAY-FAILED" in out4, out4)
+pl4.stop()
+
+# ============ 19) هروب مسار bat والتحقق من الملكية ============
+from src.context_aware_audio import app as app_mod
+
+check("bat escapes percent", "%%TEMP%%" in app_mod._escape_bat_text("C:\a%TEMP%b"))
+_esc = app_mod._escape_bat_text("C:\a&b^d|e<f>g!h")
+for _ch in ("&", "|", "<", ">", "!"):
+    check(f"bat escapes {_ch!r}", "^" + _ch in _esc, _esc)
+check(
+    "bat arg wraps in real quotes",
+    app_mod._bat_arg(r"C:\x") == '"' + r"C:\x" + '"',
+    app_mod._bat_arg(r"C:\x"),
+)
+check(
+    "bat arg does not escape its own quotes", "^" + '"' not in app_mod._bat_arg(r"C:\x")
+)
+check("bat marker present", "context-aware-audio-autostart" in app_mod.AUTOSTART_MARKER)
+check(
+    "launch command uses sys.executable",
+    app_mod._launch_command()[0] == sys.executable,
+    app_mod._launch_command(),
+)
+check(
+    "launch command is raw (no pre-quoted args)",
+    all(not a.startswith('"') for a in app_mod._launch_command()),
+    app_mod._launch_command(),
+)
+
+_bt = Path(tempfile.mkdtemp()) / "x.bat"
+_bt.write_text("@echo off\nsomething else\n", encoding="utf-8")
+check("foreign bat not claimed", not app_mod._is_our_bat(_bt))
+_bt.write_text(f"@echo off\n{app_mod.AUTOSTART_MARKER}\n", encoding="utf-8")
+check("our bat recognised", app_mod._is_our_bat(_bt))
+import shutil
+
+shutil.rmtree(_bt.parent, ignore_errors=True)
+
+# ============ 20) مسارات: ملف مؤقت فريد ============
+from src.context_aware_audio.paths import atomic_write
+
+_t2 = tempfile.mkdtemp()
+try:
+    tgt = Path(_t2) / "f.json"
+    atomic_write(tgt, '{"a":1}')
+    check("atomic write creates target", tgt.read_text(encoding="utf-8") == '{"a":1}')
+    leftovers = [p.name for p in Path(_t2).iterdir() if p.name != "f.json"]
+    check("atomic write leaves no temp", leftovers == [], leftovers)
+    atomic_write(tgt, '{"a":2}')
+    check(
+        "atomic write overwrites", json.loads(tgt.read_text(encoding="utf-8"))["a"] == 2
+    )
+    leftovers = [p.name for p in Path(_t2).iterdir() if p.name != "f.json"]
+    check("no temp after overwrite", leftovers == [], leftovers)
+finally:
+    import shutil
+
+    shutil.rmtree(_t2, ignore_errors=True)
+
+check("settings rejects non-dict", settings.save_settings("nope") is False)
+check("settings rejects None", settings.save_settings(None) is False)
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

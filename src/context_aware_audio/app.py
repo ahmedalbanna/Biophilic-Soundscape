@@ -33,7 +33,7 @@ from src.context_aware_audio.prayer_provider import (
 )
 from src.context_aware_audio.real_player import RealPlayer
 from src.context_aware_audio.settings import load_settings, save_settings
-from src.context_aware_audio.sound_synth import ensure_assets
+from src.context_aware_audio.sound_synth import ensure_assets, missing_assets
 from src.context_aware_audio.vad import VadProcessor
 
 
@@ -43,6 +43,9 @@ SAVE_EVERY_TICKS = 25  # نبضة واحدة كل ~5 ثوانٍ
 METER_H = 22  # ارتفاع شريط قياس الـ dB
 CALIBRATE_SEC = 2.0  # مدة قياس ضجيج الغرفة
 ATHAN_VOLUME = 0.8  # مستوى نغمة تنبيه الأذان
+
+
+AUTOSTART_MARKER = "rem context-aware-audio-autostart"
 
 
 def startup_bat_path() -> Path:
@@ -63,12 +66,11 @@ def _is_our_bat(path: Path) -> bool:
     """
     هل الملف bat كتبناه نحن؟
 
-    لا نريد أن ندّعي ملكية ملف أنشأه شيء آخر بنفس الاسم، ولا أن نحذفه عند
-    إيقاف التشغيل التلقائي.
+    نتحقق من سطر علامة فريد خاص بنا. `@echo off` سطر شائع جداً فلا يصلح
+    دليلاً على الملكية - يحذف التطبيق ملفات الآخرين أو يدّعيها.
     """
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            return fh.readline().strip().lower() == "@echo off"
+        return AUTOSTART_MARKER in path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
 
@@ -82,10 +84,35 @@ def is_autostart() -> bool:
 
 
 def _launch_command() -> list:
-    """أمر تشغيل التطبيق: exe عند التجميد، وإلا python -m."""
+    """
+    وسيطات تشغيل التطبيق (خام، بلا اقتباس).
+
+    نستخدم sys.executable دائماً بدل "python": الأخير قد لا يكون على PATH
+    وقت تسجيل الدخول، فيفشل التشغيل التلقائي بصمت. الاقتباس والتهريب
+    يحدثان عند الكتابة فقط - التهريب هنا كان يُنتج `^"` فيكسر الأمر.
+    """
     if getattr(sys, "frozen", False):
-        return [f'"{Path(sys.executable)}"']
-    return ["python", "-m", "src.context_aware_audio.app"]
+        return [sys.executable]
+    return [sys.executable, "-m", "src.context_aware_audio.app"]
+
+
+def _escape_bat_text(value: str) -> str:
+    """
+    يهرّب محارف ذات معنى في cmd.exe.
+
+    `%` للتوسيع، و`^` و`&` و`|` و`<` و`>` للتحكم، و`!` للتأخير عند
+    expansions مفعّلة. لا نهرّب `"`: المسارات على ويندوز لا تحويها أصلاً،
+    وتهريبها يُنتج `^"` الذي يمرّر علامة اقتباس حرفية للبرنامج.
+    """
+    out = value.replace("%", "%%")
+    for ch in ("^", "&", "|", "<", ">", "!"):
+        out = out.replace(ch, "^" + ch)
+    return out
+
+
+def _bat_arg(value: str) -> str:
+    """وسطة واحدة مقتبسة ومهزّبة، صالحة للسطر في cmd.exe."""
+    return f'"{_escape_bat_text(value)}"'
 
 
 def set_autostart(on: bool) -> bool:
@@ -108,11 +135,12 @@ def set_autostart(on: bool) -> bool:
             work_dir = str(Path(sys.executable).parent)
         else:
             work_dir = str(Path(__file__).resolve().parents[2])
-        # `%` محرف توسيع في cmd.exe، و`&` و`^` لهما معنى خاص
-        safe_dir = work_dir.replace("%", "%%").replace("^", "^^").replace("&", "^&")
+        command = " ".join(_bat_arg(part) for part in _launch_command())
         target.write_text(
-            "@echo off\nchcp 65001 >nul\nset PYTHONUTF8=1\n"
-            f'cd /d "{safe_dir}"\n{" ".join(_launch_command())}\n',
+            "@echo off\n"
+            f"{AUTOSTART_MARKER}\n"
+            "chcp 65001 >nul\nset PYTHONUTF8=1\n"
+            f"cd /d {_bat_arg(work_dir)}\n{command}\n",
             encoding="utf-8",
         )
         return True
@@ -149,6 +177,7 @@ class DesktopApp:
         self._prayer_date = None
         self._athan_played: set = set()
         self._scenario_until = 0.0
+        self._scenario_db_value = 0.0
         self.athan_enabled = tk.BooleanVar(
             value=bool(self._settings.get("athan_enabled", True))
         )
@@ -161,6 +190,7 @@ class DesktopApp:
         self._last_mute = False
         self._last_vol = -1.0
         self._last_eq = -1.0
+        self._last_player = self.player
         self.autostart = tk.BooleanVar(value=is_autostart())
         self._save_counter = 0
         self.period_eq = {
@@ -193,6 +223,10 @@ class DesktopApp:
         )
         if self.log_path is not None:
             self._log(f"ملف السجل: {self.log_path}")
+        # الأصول الناقصة = صمت غير مفسر. أبلغ هنا لأن هذه أول سجل يُقرأ.
+        absent = missing_assets()
+        if absent:
+            self._log(f"تحذير: {len(absent)} ملف صوتي ناقص: {', '.join(absent)}")
 
     def _on_close(self):
         try:
@@ -486,15 +520,20 @@ class DesktopApp:
             fr = AudioFrame(timestamp=ts, db_level=50, is_speech=True)
             label, hold = "كلام عادي", 3.0
         self._scenario_until = time.time() + hold
+        self._scenario_db_value = fr.db_level
         self._log(f"سيناريو: {label} (مثبَّت {hold:.0f}ث)")
         cmd = self.engine.process_frame(fr, now)
-        self.player.apply(cmd)
+        self._log(self.player.apply(cmd))
         self._log(str(cmd))
 
     def _scenario_db(self) -> float | None:
-        """مستوى dB المزروع ما زال سارياً، وإلا None."""
+        """مستوى dB المزروع ما زال سارياً، وإلا None.
+
+        يُعيد قيمة السيناريو نفسه لا قيمة ثابتة، وإلا contra العدّاد
+        والتسمية على الشاشة يخالفان ما يقوله السجل.
+        """
         if self._scenario_until and time.time() < self._scenario_until:
-            return 75.0
+            return self._scenario_db_value
         self._scenario_until = 0.0
         return None
 
@@ -554,7 +593,14 @@ class DesktopApp:
 
         لا نعيد دفع القيم لم يتغيّر: كل دفعة تستهلك قفلاً في المشغّل،
         وتحريك المعامل المتكرر يُولّد خيوط تدرّج بلا فائدة.
+
+        إن أُعيد إنشاء المشغّل لازم تُصفَّر الحواجز، وإلا لن يصله مستوى
+        الصوت الحالي أبداً لأن القيم ستُعتبر "لم تتغيّر".
         """
+        if self.player is not self._last_player:
+            self._last_player = self.player
+            self._last_vol = -1.0
+            self._last_eq = -1.0
         vol = float(self.master_vol.get()) / 100.0
         if abs(vol - self._last_vol) >= 0.005:
             self.player.set_master_volume(vol)
