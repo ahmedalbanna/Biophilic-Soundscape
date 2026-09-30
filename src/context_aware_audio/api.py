@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from .service import AudioService
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+MAX_BODY_BYTES = 64 * 1024
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
 SSE_INTERVAL_SEC = 0.2
@@ -182,10 +183,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "لا يوجد المسار"}, 404)
         try:
             length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "Content-Length غير صالح"}, 400)
+        # سقف قبل القراءة لا بعدها: الخادم الذي يقرأ gigabyte ثم يرفضه
+        # ليس خادماً؛拒绝 أبكر وأرخص. والصفحة ترسل إعدادات لا تنال
+        # كيلوبايت، فالسقف لا يزعجها.
+        if length > MAX_BODY_BYTES:
+            return self._json({"error": "الطلب أكبر من السقف"}, 413)
+        try:
             raw = self.rfile.read(length) if length else b"{}"
             body = json.loads(raw.decode("utf-8") or "{}")
         except (ValueError, OSError) as exc:
             return self._json({"error": f"طلب غير صالح: {exc}"}, 400)
+        if not isinstance(body, dict):
+            return self._json({"error": "الجذر يجب أن يكون كائناً"}, 400)
 
         name = body.get("name")
         args = body.get("args") or []
@@ -204,16 +215,30 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "command": name, "result": result})
 
 
+class AudioServer(ThreadingHTTPServer):
+    """
+    خادم بطابور انتظار واسع.
+
+    الطابور الافتراضي في http.server خمسة اتصالات. الصفحة تفتح بثّاً
+    وتسأل عن السجل كل أربع ثوانٍ وتُرسل أمراً عند الضغط — فخمس
+    اتصالات في اللحظة الواحدة ليس افتراضاً بل حالة عادية. وما
+    فوق الخمسة يُهمَل على ويندوز، فيرى الطلب «انقطع الاتصال قبل
+    جواب». أُنجز ذلك في فحص عشرة خيوط متزامنة، لا بالتخمين.
+    """
+
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def build_server(
     service: Optional[AudioService] = None,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-) -> Tuple[ThreadingHTTPServer, AudioService]:
+) -> Tuple[AudioServer, AudioService]:
     """خادم جاهز. يُرجع (الخادم، الخدمة) ليملكها المتصل."""
     service = service or AudioService()
     handler = type("BoundHandler", (Handler,), {"service": service})
-    httpd = ThreadingHTTPServer((host, port), handler)
-    httpd.daemon_threads = True
+    httpd = AudioServer((host, port), handler)
     return httpd, service
 
 

@@ -100,17 +100,43 @@ class ContentStore:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
-    def _commit(self) -> None:
-        with self._lock:
-            if self._conn is not None and not self._closed:
-                self._conn.commit()
 
-    def _exec(self, sql: str, args: tuple = ()):
-        """تنفيذ مقفل. كل وصول للمخزن يمرّ من هنا."""
+    def _query(self, sql: str, args: tuple = ()) -> List["sqlite3.Row"]:
+        """
+        ينفّذ ويسحب داخل القفل معاً، ويعيد كل الصفوف.
+
+        السحب داخل القفل هو كل شيء هنا. القفل على التنفيذ وحده لا
+        يكفي: على اتصال واحد يتسابق المؤشّران، فيُسحب صفُ خيطٍ بعد
+        أن ينفّذ خيطٌ آخر - ويعود `fetchone()` بلا شيء. عزل الخيوط في
+        sqlite3 يحمي الاتصال لا المؤشّر.
+
+        كل الصفوف لا صفاً واحداً: القائمة أمتن من مؤشّرٍ يجب أن
+        يبقى حياً بعد أن يُحرَّر القفل.
+        """
         with self._lock:
-            if self._conn is None or self._closed:
-                raise sqlite3.ProgrammingError("المخزن مغلق")
-            return self._conn.execute(sql, args)
+            self._live()
+            return self._conn.execute(sql, args).fetchall()
+
+    def _write(self, sql: str, args: tuple = ()) -> int:
+        """ينفّذ كتابةً ويثبّتها داخل القفل، ويعيد رقم الصفّ."""
+        with self._lock:
+            self._live()
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def _delete(self, sql: str, args: tuple = ()) -> int:
+        """يحذف ويثبّت داخل القفل، ويعيد عدد الصفوف المحذوفة."""
+        with self._lock:
+            self._live()
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def _live(self) -> None:
+        """اتصال حيّ. يُستدعى داخل القفل فقط."""
+        if self._conn is None or self._closed:
+            raise sqlite3.ProgrammingError("المخزن مغلق")
 
 
     @property
@@ -154,7 +180,7 @@ class ContentStore:
         القيمة تجعل «تغيّر المدة» أسبق من التحديث بلا داع.
         """
         stamp = added_at or datetime.now().isoformat(timespec="seconds")
-        self._exec(
+        self._write(
             """
             INSERT INTO audio_content (
               id, title, file_path, kind, window_key, sequence_index,
@@ -195,24 +221,21 @@ class ContentStore:
                 stamp,
             ),
         )
-        self._commit()
 
     def all_content(self) -> List[sqlite3.Row]:
-        return list(
-            self._exec(
-                "SELECT * FROM audio_content WHERE enabled=1 ORDER BY id"
-            )
+        return self._query(
+            "SELECT * FROM audio_content WHERE enabled=1 ORDER BY id"
         )
 
     def count(self) -> int:
-        return int(
-            self._exec("SELECT COUNT(*) FROM audio_content").fetchone()[0]
-        )
+        rows = self._query("SELECT COUNT(*) FROM audio_content")
+        return int(rows[0][0]) if rows else 0
 
     def get(self, content_id: str) -> Optional[sqlite3.Row]:
-        return self._exec(
+        rows = self._query(
             "SELECT * FROM audio_content WHERE id=?", (content_id,)
-        ).fetchone()
+        )
+        return rows[0] if rows else None
 
     # ---------- اختيار المقطع التالي ----------
     def next_for_window(self, window_key: str) -> Optional[sqlite3.Row]:
@@ -232,7 +255,7 @@ class ContentStore:
           أولاً في SQLite، فيُقدَّم جديد بلا سجل على قديم.
         """,
         )
-        sequenced = self._exec(
+        sequenced = self._query(
             """
             SELECT c.* FROM audio_content c
             WHERE c.enabled=1 AND c.window_key=?
@@ -245,10 +268,10 @@ class ContentStore:
             LIMIT 1
             """,
             (window_key, OUTCOME_COMPLETED, OUTCOME_SKIPPED),
-        ).fetchone()
-        if sequenced is not None:
-            return sequenced
-        return self._exec(
+        )
+        if sequenced:
+            return sequenced[0]
+        rows = self._query(
             """
             SELECT c.* FROM audio_content c
             LEFT JOIN playback_log p ON p.audio_id = c.id
@@ -259,24 +282,23 @@ class ContentStore:
             LIMIT 1
             """,
             (window_key,),
-        ).fetchone()
+        )
+        return rows[0] if rows else None
 
     # ---------- سجل التشغيل ----------
     def log_start(self, audio_id: str, window_key: str, started_at: str) -> int:
-        cur = self._exec(
+        return self._write(
             """
             INSERT INTO playback_log (audio_id, window_key, started_at, outcome)
             VALUES (?,?,?,?)
             """,
             (audio_id, window_key, started_at, OUTCOME_INTERRUPTED),
         )
-        self._commit()
-        return int(cur.lastrowid)
 
     def log_finish(
         self, log_id: int, outcome: str, position_sec: float, ended_at: str
     ) -> None:
-        self._exec(
+        self._write(
             """
             UPDATE playback_log
             SET outcome=?, position_sec=?, ended_at=?
@@ -284,7 +306,6 @@ class ContentStore:
             """,
             (outcome, position_sec, ended_at, log_id),
         )
-        self._commit()
 
     def plays_today(
         self, window_key: str, day: str, exclude_outcome: Optional[str] = None
@@ -300,18 +321,18 @@ class ContentStore:
         وعدّاده كان يمنع النافذة بقية اليوم بلا سبب.
         """
         if exclude_outcome:
-            row = self._exec(
+            rows = self._query(
                 "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
                 "AND started_at LIKE ? AND outcome IS NOT ?",
                 (window_key, f"{day}%", exclude_outcome),
-            ).fetchone()
+            )
         else:
-            row = self._exec(
+            rows = self._query(
                 "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
                 "AND started_at LIKE ?",
                 (window_key, f"{day}%"),
-            ).fetchone()
-        return int(row[0])
+            )
+        return int(rows[0][0]) if rows else 0
 
     def last_started(
         self, window_key: str, exclude_outcome: Optional[str] = None
@@ -325,17 +346,19 @@ class ContentStore:
         بعد أن انتهت الصلاة بلا سبب.
         """
         if exclude_outcome:
-            row = self._exec(
+            rows = self._query(
                 "SELECT MAX(started_at) FROM playback_log "
                 "WHERE window_key=? AND outcome IS NOT ?",
                 (window_key, exclude_outcome),
-            ).fetchone()
+            )
         else:
-            row = self._exec(
+            rows = self._query(
                 "SELECT MAX(started_at) FROM playback_log WHERE window_key=?",
                 (window_key,),
-            ).fetchone()
-        return row[0] if row and row[0] else None
+            )
+        if not rows or rows[0][0] is None:
+            return None
+        return rows[0][0]
 
     def stats(self) -> List[Tuple[str, int, float]]:
         """
@@ -345,7 +368,7 @@ class ContentStore:
         """
         return [
             (row["audio_id"], int(row["plays"]), float(row["seconds"]))
-            for row in self._exec(
+            for row in self._query(
                 "SELECT audio_id, COUNT(*) AS plays, SUM(position_sec) AS seconds "
                 "FROM playback_log GROUP BY audio_id ORDER BY audio_id"
             )
@@ -367,8 +390,6 @@ class ContentStore:
         if days <= 0:
             return 0
         cutoff = (datetime.fromisoformat(today) - timedelta(days=days)).date()
-        cur = self._exec(
+        return self._delete(
             "DELETE FROM playback_log WHERE started_at < ?", (cutoff.isoformat(),)
         )
-        self._commit()
-        return int(cur.rowcount)
