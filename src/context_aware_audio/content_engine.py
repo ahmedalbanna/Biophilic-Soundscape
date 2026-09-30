@@ -20,7 +20,12 @@ from typing import Optional
 
 from .audio_types import AudioFrame, ContentAction, DayPeriod
 from .config import EngineConfig
-from .content_store import OUTCOME_ABANDONED, OUTCOME_COMPLETED, ContentStore
+from .content_store import (
+    OUTCOME_ABANDONED,
+    OUTCOME_COMPLETED,
+    OUTCOME_SKIPPED,
+    ContentStore,
+)
 
 
 class ContentState:
@@ -134,6 +139,38 @@ class ContentEngine:
                 state=self.state,
             )
         return ContentDecision(reason=reason, state=self.state)
+
+    def abandon(self, reason: str = "تخطٍّ يدوي") -> None:
+        """
+        يختم المقطع كتخطٍّ لا كقطع.
+
+        الفرق مقصود: التخطّي اختيار من المستخدم، فالتالي هو المقصود.
+        أما القطع بالصلاة فلا يعني أنه سمع شيئاً، ولا يجوز أن يُحسب
+        مرة واحدة في اليوم. وabandon لا يحسم التقدّم، وskipped
+        يحسمه.
+        """
+        self._close_log(OUTCOME_SKIPPED, now=datetime.now())
+        self.reset()
+
+    def request_now(self, clip, now: datetime) -> bool:
+        """
+        تشغيل مقطع بطلب صريح، متجاوزاً البوابة.
+
+        البوابة تحرس الانتباه: غرفة فيها ضجيج فوق 50dB ولا معنى
+        لسردٍ فوق مجلس. أما من ضغط الزر فالمجلس يريد السمع الآن،
+        والضغط طلب لا حارس.
+
+        يسجّل المقطع كـ completed عند انتهائه كأي غيره، فلا يبقى بلا
+        أثر. يعيد True إن بدأ.
+        """
+        if clip is None or self.store is None:
+            return False
+        self._close_log(OUTCOME_ABANDONED, now=now)
+        self.reset()
+        self._start(clip, clip["window_key"], now)
+        self.state = ContentState.PLAYING
+        self._room_quiet_since = None  # البوابة لن تعيد التحقق لهذا المقطع
+        return True
 
     # ---------- المسار الرئيسي ----------
     def update(

@@ -125,7 +125,7 @@ class RealContentPlayer:
         if action is ContentAction.START:
             return self._start(file, volume, position_sec)
         if action is ContentAction.RESUME:
-            return self._resume(volume, position_sec)
+            return self._resume(file, volume, position_sec)
         if action is ContentAction.PAUSE:
             return self._pause()
         if action in (ContentAction.STOP, ContentAction.FINISHED):
@@ -176,9 +176,18 @@ class RealContentPlayer:
             return f" (تعذّر الإرجاع: {exc})"
         return ""
 
-    def _resume(self, volume, position_sec) -> str:
+    def _resume(self, file, volume, position_sec) -> str:
+        """
+        استئناف، أو بدء إن لم يكن هناك مقطع محمّل.
+
+        استئناف بلا ملف لا يفعل شيئاً: الإيقاف مسح الملف، فالكتم ثم
+        رفعه كانا يتركان صمتاً بلا نهاية. نبدأ عند موضع المحرك - وهو
+        المرجع - فالمحتوى يعود حيث توقّف لا حيث بلغ الجهاز.
+        """
         if self.current_file is None:
-            return self._log("RESUME بلا مقطع جارٍ")
+            if not file:
+                return self._log("RESUME بلا مقطع جارٍ ولا ملف")
+            return self._start(file, volume, position_sec)
         try:
             self._pg.mixer.music.unpause()
             self._pg.mixer.music.set_volume(max(0.0, min(1.0, volume)))
@@ -215,6 +224,17 @@ class RealContentPlayer:
         self.is_paused = False
         self.volume = 0.0
         return self._log(f"{action.value} {name or '-'}")
+
+    def stop(self) -> None:
+        """
+        إيقاف مباشر بلا قرار.
+
+        للكتم اليدوي والإغلاق. يمرّ من نفس طريق _stop حتى يُغلق
+        سجل التشغيل بنفس الشكل.
+        """
+        if self.current_file is None and not self.is_playing:
+            return
+        self._stop(ContentAction.STOP)
 
     # ---------- تشخيص ----------
     def device_position_sec(self) -> float:

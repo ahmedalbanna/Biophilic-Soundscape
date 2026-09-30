@@ -23,7 +23,7 @@ except Exception:
     tk = None
 
 from src.context_aware_audio import ContextAwareAudioEngine, EngineConfig
-from src.context_aware_audio.audio_types import AudioFrame
+from src.context_aware_audio.audio_types import AudioFrame, ContentAction
 from src.context_aware_audio.cultural_calendar import PERIOD_LABELS_AR
 from src.context_aware_audio.mic_input import MicInput
 from src.context_aware_audio.prayer_provider import (
@@ -33,6 +33,10 @@ from src.context_aware_audio.prayer_provider import (
 )
 from src.context_aware_audio.real_player import RealPlayer
 from src.context_aware_audio.settings import load_settings, save_settings
+from src.context_aware_audio.content_library import ContentLibrary
+from src.context_aware_audio.content_store import ContentStore
+from src.context_aware_audio.paths import content_library_dir, user_data_dir
+from src.context_aware_audio.real_content import RealContentPlayer
 from src.context_aware_audio.sim_clock import SimClock
 from src.context_aware_audio.sound_synth import ensure_assets, missing_assets
 from src.context_aware_audio.vad import VadProcessor
@@ -51,6 +55,12 @@ ATHAN_VOLUME = 0.8  # مستوى نغمة تنبيه الأذان
 #   عميق 80% - متحدث واحد بصوت عالٍ أو تلفاز
 # لا يوجد عمق 90%: عند 65dB يصبح الكتم تاماً (نقاش حامي)،
 # فلا أحد ينطق 90% في هذا المشروع.
+CONTENT_STATE_LABELS = {
+    "playing": "يُبثّ",
+    "paused_interrupt": "معلّق بالمقاطعة",
+    "waiting_quiet": "بانتظار هدوء الغرفة",
+    "postponed": "مؤجَّلة لليوم",
+}
 DUCK_PRESETS = (60.0, 70.0, 80.0)
 DUCK_PRESET_LABELS = {60.0: "خفيف", 70.0: "عادي", 80.0: "عميق"}
 
@@ -178,6 +188,8 @@ class DesktopApp:
 
         self.config = EngineConfig()
         self.engine = ContextAwareAudioEngine(self.config)
+        # مرجع قصير لمحرك المحتوى: اللوحة تقرأ حالته في كل نبضة
+        self.content = self.engine.content
         self.vad = VadProcessor(self.config)
         self.player = RealPlayer()
         self._settings = load_settings()
@@ -219,6 +231,34 @@ class DesktopApp:
         self.duck_depth = tk.DoubleVar(
             value=float(self._settings.get("duck_depth", 70.0))
         )
+
+        # --- مسار المحتوى ---
+        self.content_enabled = bool(self._settings.get("content_enabled", True))
+        self.content_muted = tk.BooleanVar(
+            value=bool(self._settings.get("content_muted", False))
+        )
+        self.content_volume = tk.DoubleVar(
+            value=float(self._settings.get("content_volume", 0.85)) * 100.0
+        )
+        self.content_title = tk.StringVar(value="لا يوجد مقطع جارٍ")
+        self.content_state = tk.StringVar(value="—")
+        self.content_position = tk.StringVar(value="—")
+        self.content_library = tk.StringVar(value="")
+        self.content_volume_text = tk.StringVar(value="")
+        self.config.content_enabled = self.content_enabled
+        self.config.content_volume = float(
+            self._settings.get("content_volume", 0.85)
+        )
+        # المخزن والمكتبة والمشغّل. أي فشل هنا لا يوقف التطبيق:
+        # يعمل بالخلفية وحدها، واللوحة تشرح السبب.
+        self._content_store = None
+        self._content_library = None
+        self.content_player = None
+        self._content_error = ""
+        self.content_library_path = content_library_dir(
+            str(self._settings.get("content_library_dir", ""))
+        )
+        self._init_content()
         # الإعداد يمرّ مرة واحدة: نحوّله إلى إعدادات المحرك، ومنها
         # engine.duck_max_ratio. مصدر واحد لا قيمتان متناقضتان.
         self.config.duck_depth = float(self.duck_depth.get())
@@ -291,6 +331,12 @@ class DesktopApp:
             "sim_offset_sec": self.clock.offset_sec,
             "sim_enabled": bool(self.clock.enabled),
             "duck_depth": float(self.duck_depth.get()),
+            "content_enabled": bool(self.content_enabled),
+            "content_muted": bool(self.content_muted.get()),
+            "content_volume": self.config.content_volume,
+            "content_library_dir": str(
+                self._settings.get("content_library_dir", "")
+            ),
         }
 
     def _save_settings(self) -> bool:
@@ -333,6 +379,7 @@ class DesktopApp:
         self.db_label.pack(anchor="w")
 
         self._build_sim_panel(f)
+        self._build_content_panel(f)
 
         src = ttk.LabelFrame(f, text="مصدر الصوت", padding=8)
         src.pack(fill="x", pady=6)
@@ -537,6 +584,245 @@ class DesktopApp:
             foreground="#666",
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
+
+    # ---------- مسار المحتوى ----------
+    def _init_content(self):
+        """
+        يهيّئ المخزن والمكتبة والمشغّل، ولا يوقف التطبيق عند الفشل.
+
+        مكتبة فارغة أو قاعدة تالفة أو music محجوز: كلها حالات طبيعية.
+        التطبيق يعمل بالخلفية وحدها، واللوحة تشرح السبب.
+        """
+        try:
+            self._content_store = ContentStore(user_data_dir() / "content.db")
+        except Exception as exc:
+            self._content_error = f"تعذّر فتح قاعدة المحتوى: {exc}"
+            self._content_store = None
+            return
+        self.engine.content.store = self._content_store
+        self._content_library = ContentLibrary(
+            self.content_library_path, self._content_store, self.config
+        )
+        try:
+            self.content_player = RealContentPlayer(
+                self.content_library_path, background=self.player
+            )
+        except Exception as exc:
+            self._content_error = f"تعذّر تهيئة مشغّل المحتوى: {exc}"
+            self.content_player = None
+            return
+        if not self.content_player.available:
+            self._content_error = self.content_player.unavailable.reason
+
+    def _content_ready(self) -> bool:
+        return self._content_library is not None and self.content is not None
+
+    def _content_now_window(self) -> str:
+        """النافذة المقابلة للفترة الحالية، أو نص فارغ."""
+        period = self.engine.calendar.period_for_datetime(self.clock.now())
+        for key, spec in self.config.content_windows.items():
+            if period in spec["periods"]:
+                return key
+        return ""
+
+    def _content_tick(self, cmd, now):
+        """
+        ينفّذ قرار المحتوى على المشغّل. القرار يبقى في المحرك.
+
+        الكتم يعطّل المؤشر نفسه لا المشغّل وحده: تركه يعمل يعني أن
+        الموضع يتقدّم بلا صوت، فيخرج الوقت من الشريط، فلا يبقى
+        عند رفع الكتم ما يُستأنف. فالكتم يوقفه مؤقتاً، ورفعه يعيده.
+        """
+        if self.content_player is None:
+            self._update_content_readout()
+            return
+        eng = self.content
+        if bool(self.content_muted.get()) or not self.content_enabled:
+            if eng is not None and eng.is_running:
+                eng.force_pause("كتم المحتوى")
+            self.content_player.stop()
+            self._update_content_readout()
+            return
+        if (
+            eng is not None
+            and eng.is_running
+            and not self.content_player.is_playing
+        ):
+            # رفع الكتم: المشغّل فقد الملف عند الإيقاف، فاستئناف
+            # بلا ملف لا يفعل شيئاً. نعيد التشغيل عند موضع المحرك،
+            # وهو المرجع لا موضع الجهاز.
+            self.content_player.apply(
+                ContentAction.RESUME,
+                eng.current_file,
+                self.config.content_volume,
+                eng.position_sec,
+            )
+        line = self.content_player.apply(
+            cmd.content_action,
+            cmd.content_file,
+            cmd.content_volume or self.config.content_volume,
+            cmd.content_position_sec,
+        )
+        if cmd.content_action.value in ("start", "resume", "stop", "finished"):
+            self._log(f"محتوى: {line}")
+        self._update_content_readout()
+
+    def _update_content_readout(self):
+        """يحدّث العنوان والحالة والموضع. لا يقرّر شيئاً."""
+        if not hasattr(self, "content_title"):
+            return
+        if self._content_library is not None:
+            self.content_library.set(str(self.content_library_path))
+        self.content_volume_text.set(f"مستوى {self.config.content_volume:.0%}")
+        eng = self.content
+        pct = 0.0
+        if eng is not None and eng.is_running:
+            if eng.duration_sec > 0:
+                pct = max(
+                    0.0, min(100.0, eng.position_sec * 100.0 / eng.duration_sec)
+                )
+            self.content_title.set(f"جارٍ: {eng.current_title}")
+            self.content_state.set(CONTENT_STATE_LABELS.get(eng.state, eng.state))
+            self.content_position.set(
+                f"الموضع: {eng.position_sec:.0f} / {eng.duration_sec:.0f} ث"
+                f" ({pct:.0f}%)"
+            )
+        else:
+            self.content_title.set("لا يوجد مقطع جارٍ")
+            self.content_state.set("—")
+            self.content_position.set("—")
+        try:
+            self._content_meter.configure(value=pct)
+        except tk.TclError:
+            pass
+
+    # ---------- أزرار المحتوى ----------
+    def _on_content_play(self):
+        """تشغيل فوري يتجاوز البوابة: طلب المجلس طلب صريح."""
+        if not self._content_ready():
+            self._log("تشغيل فوري: المكتبة غير جاهزة")
+            return
+        clip = self._content_store.next_for_window(self._content_now_window())
+        if clip is None:
+            self._log("تشغيل فوري: لا مقطع في النافذة الحالية")
+            return
+        if self.content.request_now(clip, self.clock.now()):
+            self._log(f"تشغيل فوري: {clip['title']}")
+        else:
+            self._log("تشغيل فوري: تعذّر البدء")
+
+    def _on_content_skip(self):
+        """ينهي المقطع الجار ويقدّم التسلسل. لا يحسبه «مرة في اليوم»."""
+        if not self._content_ready():
+            return
+        was = self.content.current_title
+        self.content.abandon("تخطٍّ يدوي")
+        if was:
+            self._log(f"تخطّيت: {was}")
+
+    def _on_content_mute(self):
+        """الكتم يقرأ المتغيّر ولا يقلبه: المتغيّر مصدر الحقيقة."""
+        if bool(self.content_muted.get()):
+            self._log("كتم المحتوى")
+        else:
+            self._log("رفع كتم المحتوى")
+
+    def _on_content_volume(self, value=None):
+        try:
+            self.config.content_volume = max(0.0, min(1.0, float(value) / 100.0))
+        except (TypeError, ValueError, tk.TclError):
+            return
+        self._update_content_readout()
+
+    def _on_content_rescan(self):
+        """يعيد فحص المجلد. مكتبة فارغة حالة صريحة لا صمت."""
+        if self._content_library is None:
+            self._log("فحص المكتبة: غير مهيّأة")
+            return
+        report = self._content_library.scan()
+        if report.total:
+            self._log(
+                f"فحص المكتبة: {report.total} مقطع "
+                f"({report.added} جديد، {report.updated} محدَّث)"
+            )
+        elif report.is_empty:
+            self._log("فحص المكتبة: المجلد فارغ")
+        for err in report.errors[:3]:
+            self._log(f"فحص المكتبة: {err}")
+        self._update_content_readout()
+
+    def _on_content_open(self):
+        """يفتح مجلد المحتوى في مستكشف ويندوز."""
+        if self._content_library is None:
+            return
+        path = self._content_library.ensure_root()
+        try:
+            os.startfile(str(path))
+        except (OSError, AttributeError) as exc:
+            self._log(f"تعذّر فتح المجلد: {exc}")
+
+    def _build_content_panel(self, parent):
+        """لوحة المحتوى: الحالة، الموضع، الأزرار، والمكتبة."""
+        box = ttk.LabelFrame(parent, text="مسار المحتوى", padding=8)
+        box.pack(fill="x", pady=6)
+
+        head = ttk.Frame(box)
+        head.pack(fill="x")
+        ttk.Label(head, textvariable=self.content_title).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Label(head, textvariable=self.content_state).pack(side="right")
+        ttk.Label(box, textvariable=self.content_position).pack(anchor="w")
+        self._content_meter = ttk.Scale(box, from_=0, to=100, orient="horizontal")
+        self._content_meter.pack(fill="x", pady=(2, 4))
+
+        row = ttk.Frame(box)
+        row.pack(fill="x")
+        ttk.Button(row, text="شغّل الآن", command=self._on_content_play).pack(
+            side="left", padx=2
+        )
+        ttk.Button(row, text="تخطّي", command=self._on_content_skip).pack(
+            side="left", padx=2
+        )
+        ttk.Checkbutton(
+            row, text="كتم المحتوى", variable=self.content_muted,
+            command=self._on_content_mute,
+        ).pack(side="left", padx=8)
+        ttk.Label(
+            row, textvariable=self.content_volume_text, font=("Segoe UI", 8)
+        ).pack(side="right")
+
+        vrow = ttk.Frame(box)
+        vrow.pack(fill="x", pady=(4, 2))
+        ttk.Label(vrow, text="مستوى المحتوى:").pack(side="left", padx=(0, 4))
+        ttk.Scale(
+            vrow, from_=0, to=100, orient="horizontal",
+            variable=self.content_volume, command=self._on_content_volume,
+        ).pack(side="left", fill="x", expand=True)
+
+        lib = ttk.Frame(box)
+        lib.pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            lib, text="إعادة فحص المكتبة", command=self._on_content_rescan
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            lib, text="افتح المجلد", command=self._on_content_open
+        ).pack(side="left", padx=2)
+        ttk.Label(
+            lib, textvariable=self.content_library, font=("Segoe UI", 8),
+            foreground="#555",
+        ).pack(side="left", padx=8)
+
+        ttk.Label(
+            box,
+            text=(
+                "الصيغة في الاسم: النافذة__الترتيب__العنوان.mp3"
+                " — مثال: maqil_story__001__story.mp3"
+                " والترتيب اختياري"
+            ),
+            font=("Segoe UI", 8), foreground="#666", justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+        return box
 
     def _log(self, msg: str):
         """يكتب سطراً في لوحة السجل، وفي ملف السجل عبر stdout.
@@ -749,6 +1035,7 @@ class DesktopApp:
                 self._update_readouts(now, cmd, db, auto.is_speech, auto.is_speech_raw)
             else:
                 self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
+            self._content_tick(cmd, now)
             self._update_sim_readout(now, real_now)
             self._maybe_save_settings()
         except Exception as e:

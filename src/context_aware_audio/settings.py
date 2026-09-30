@@ -24,6 +24,11 @@ DEFAULTS = {
     "sim_offset_sec": 0.0,
     "sim_enabled": False,
     "duck_depth": 70.0,
+    # مسار المحتوى التعليمي
+    "content_enabled": True,
+    "content_muted": False,
+    "content_volume": 0.85,
+    "content_library_dir": "",
 }
 
 
@@ -81,6 +86,19 @@ def _as_device(value: Any) -> Optional[int]:
     return idx if idx >= 0 else None
 
 
+def _as_dir(value: Any) -> str:
+    """
+    مسار مجلد نصّي، أو نص فارغ يعني الافتراضي.
+
+    يُقصّ على 400 محرفاً: حقل في ملف JSON قابل للتحرير يدوياً، بلا
+    سقف كان يعني مساراً من أي طول. والقصّ يمنع أيضاً مفتاحاً عملاقاً
+    في واجهة الإعدادات.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:400]
+
+
 _COERCERS: dict[str, Callable[[Any], Any]] = {
     "master_vol": lambda v: _as_float(v, DEFAULTS["master_vol"], 0.0, 100.0),
     "master_mute": lambda v: _as_bool(v, DEFAULTS["master_mute"]),
@@ -94,6 +112,13 @@ _COERCERS: dict[str, Callable[[Any], Any]] = {
     "sim_enabled": lambda v: _as_bool(v, DEFAULTS["sim_enabled"]),
     # عمق الخفض: نسبة مئوية بين 0 و100، ما عدا 0 فهو بلا خفض
     "duck_depth": lambda v: _as_float(v, DEFAULTS["duck_depth"], 0.0, 95.0),
+    # مسار المحتوى: 0.85 افتراضياً، والقصّ يمنع مستوىً يتجاوز 100%
+    "content_enabled": lambda v: _as_bool(v, DEFAULTS["content_enabled"]),
+    "content_muted": lambda v: _as_bool(v, DEFAULTS["content_muted"]),
+    "content_volume": lambda v: _as_float(
+        v, DEFAULTS["content_volume"], 0.0, 1.0
+    ),
+    "content_library_dir": _as_dir,
 }
 
 

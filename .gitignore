@@ -36,3 +36,7 @@ assets/*.tmp
 content.db
 content.db-journal
 content.db-wal
+content.db-shm
+
+# مجلد مكتبة المحتوى: ملفات يضعها المستخدم
+assets/content/

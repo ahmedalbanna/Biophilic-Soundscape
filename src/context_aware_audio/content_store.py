@@ -174,7 +174,8 @@ class ContentStore:
 
         - مع تسلسل (قصص الأنبياء): أدنى sequence_index ليس له سجل
           بنتيجة completed. هذا هو التقدّم التصاعدي نفسه، فما
-          انتهى منه لا يعود مرشّحاً أبداً إلا بإعادة الفحص.
+          انتهى أو تُخطّي منه لا يعود مرشّحاً. أما ما قطعته الصلاة
+          (abandoned) فيبقى مرشّحاً: لم يُسمع، فليس تقدّماً.
 
         - بلا تسلسل (أحاديث): الأقدم تشغيلاً، فالأقل عدداً، فالمعرّف.
           الصلة الخارجية تحفظ من لم يُشغَّل أبداً، وترتيبه NULL يجعله
@@ -187,12 +188,12 @@ class ContentStore:
               AND c.sequence_index IS NOT NULL
               AND NOT EXISTS (
                 SELECT 1 FROM playback_log p
-                WHERE p.audio_id=c.id AND p.outcome=?
+                WHERE p.audio_id=c.id AND p.outcome IN (?, ?)
               )
             ORDER BY c.sequence_index ASC, c.id ASC
             LIMIT 1
             """,
-            (window_key, OUTCOME_COMPLETED),
+            (window_key, OUTCOME_COMPLETED, OUTCOME_SKIPPED),
         ).fetchone()
         if sequenced is not None:
             return sequenced

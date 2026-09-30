@@ -22,11 +22,18 @@ set PYTHONUTF8=1
 python -m src.context_aware_audio.sound_synth   # generate assets/*.wav
 python -m src.context_aware_audio.simulate      # 6 scenarios, no audio hardware
 python -m src.context_aware_audio.app           # desktop UI
-python tests/test_engine.py                     # 37 checks - decision logic
-python tests/test_desktop.py                    # 164 checks - assets/player/VAD/prayer/UI
+python tests/test_engine.py                     # 128 checks - decision logic
+python tests/test_content_store.py              #  26 - content DB + play log
+python tests/test_content_library.py            #  41 - library folder scan
+python tests/test_content_engine.py             #  84 - narration state machine
+python tests/test_content_gate.py               #  52 - gate + priority integration
+python tests/test_content_player.py             #  46 - pygame.music + music_claimed
+python tests/test_content_settings.py           #  41 - settings coercion
+python tests/test_content_panel.py              #  42 - the Tk panel (real time)
+python tests/test_desktop.py                    # 245 checks - assets/player/VAD/prayer/UI
 ```
 
-Before declaring work done: `py_compile` all modules, `flake8 --select=F`, both
+Before declaring work done: `py_compile` all modules, `pyflakes`, all nine
 test files, and a UI smoke test. `simulate.py` is the fastest way to see a
 decision change take effect.
 
@@ -41,8 +48,12 @@ src/context_aware_audio/
   prayer_engine.py      # mute windows around adhan
   prayer_provider.py    # Aladhan fetch + cache
   engine.py             # the decision (this is the core)
+  content_store.py      # SQLite: clips + play log (WAL) + once-per-day window
+  content_library.py    # scans the user folder; <window>__<seq>__<title>
+  content_engine.py     # narration state machine: gate, interrupt, resume
   simulated_player.py   # no audio, for tests and simulate.py
   real_player.py        # pygame -> winsound -> log
+  real_content.py       # narration over mixer.music; executes, never decides
   mic_input.py          # sounddevice/pyaudio + calibration
   settings.py           # JSON persistence
   sound_synth.py        # numpy WAV generation
@@ -54,6 +65,13 @@ src/context_aware_audio/
 Two players, one interface. Anything that produces sound consumes
 `PlaybackCommand` and never decides policy. Anything that decides policy never
 touches audio. Keep that line.
+
+Content is a guest, not an eighth priority. Every background-emitting branch
+in `engine.py` routes through `_with_content(cmd, frame, ts, now, period)`;
+the two mute branches (prayer, debate) bypass it and call
+`force_stop` / `force_pause`, then `_attach` the result to the command so the
+player still learns. The ambient floor **replaces** `volume_ratio` — multiplying
+it by the duck curve would give 0.20 x 0.10 = 2%, i.e. silence.
 
 Naming: modules snake_case, classes CapWords, one public class per module.
 Prefer descriptive over terse — `athan_moment` beats `is_a`, `set_noise_floor`
@@ -102,10 +120,23 @@ check("cumulative name", cond, f"got {value}")
 ```
 
 Conventions that matter:
-- No sleeping. Inject timestamps; timers are tested instantly.
+- No sleeping. Inject timestamps; timers are tested instantly. The one
+  exception is `test_content_panel.py`: the Tk tick reads the wall clock, so
+  waiting there is unavoidable and the file takes ~13s. Do not "fix" that by
+  making the app injectable for tests.
 - Test conflicts, not just happy paths: prayer vs welcome, cooldown expiry.
 - `test_engine.py` for decision logic, `test_desktop.py` for hardware-adjacent
-  code with hardware faked out.
+  code with hardware faked out. Content has its own five suites because the
+  layers fail independently.
+- A helper that returns only the *last* decision is a trap. `START` lands
+  mid-window, so the final frame shows steady state, not the transition.
+  Collect every action and assert on the set. This mistake cost four
+  revisions of `test_content_gate.py`.
+- Index a transition map with `.get(action, fallback)`, never `[action]`.
+  A missing transition should fail a check, not raise `KeyError` and abort
+  the file — a crash reads like a pass in a probe.
+- `test_content_player.py` needs real pygame. The `music_claimed` guard and
+  the `set_pos` order only appear against a real mixer; do not fake it.
 - Cover every new code path, and reproduce each bug before fixing it. Three
   rounds of review review found bugs that the green suite could not see
   because the happy path was the only path tested. A test that cannot fail
