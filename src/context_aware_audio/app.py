@@ -35,6 +35,7 @@ from src.context_aware_audio.real_player import RealPlayer
 from src.context_aware_audio.settings import load_settings, save_settings
 from src.context_aware_audio.content_library import ContentLibrary
 from src.context_aware_audio.content_store import ContentStore
+from src.context_aware_audio.content_sync import list_windows, sync_window
 from src.context_aware_audio.paths import content_library_dir, user_data_dir
 from src.context_aware_audio.real_content import RealContentPlayer
 from src.context_aware_audio.sim_clock import SimClock
@@ -260,6 +261,18 @@ class DesktopApp:
         self.content_library_path = content_library_dir(
             str(self._settings.get("content_library_dir", ""))
         )
+        # المزامنة: طابور منفصل عن المواقيت، ونافذة اختيار واحدة.
+        self._sync_queue = queue.Queue()
+        self._sync_running = False
+        self._sync_windows = [
+            "fajr_dhikr",
+            "duha_wisdom",
+            "maqil_story",
+            "evening_ethic",
+        ]
+        self._sync_window = tk.StringVar(value=self._sync_windows[0])
+        self.content_sync_text = tk.StringVar(value="")
+        self.content_sync_url = str(self._settings.get("content_sync_url", ""))
         self._init_content()
         # الإعداد يمرّ مرة واحدة: نحوّله إلى إعدادات المحرك، ومنها
         # engine.duck_max_ratio. مصدر واحد لا قيمتان متناقضتان.
@@ -748,6 +761,106 @@ class DesktopApp:
             return
         self._update_content_readout()
 
+    def _on_content_sync(self):
+        """
+        يسحب نافذة واحدة من الخادم - بلا حجب للواجهة.
+
+        الشبكة في خيط عامل، والنتيجة تعود عبر الطابور كما يفعل مسار
+        المواقيت تماماً. الفحص بعد النجاح فقط: لا معنى يفحص التطبيق
+        مجلداً لم يتغيّر.
+        """
+        if self._sync_running:
+            self._log("المزامنة: جارية بالفعل")
+            return
+        if not self.content_sync_url:
+            self._log("المزامنة: لا يوجد خادم - اضبط content_sync_url")
+            self.content_sync_text.set("لا يوجد خادم")
+            return
+        self._sync_running = True
+        window = self._sync_window.get()
+        base = self.content_sync_url
+        token = str(self._settings.get("content_sync_token", ""))
+        max_parts = int(float(self._settings.get("content_sync_max_parts", 20) or 20))
+        dest = self.content_library_path
+
+        def work():
+            try:
+                result = sync_window(dest, base, window, token, max_parts=max_parts)
+                self._sync_queue.put(("result", result))
+            except Exception as exc:  # شبكة أو قرص - لا يُسقط التطبيق
+                self._sync_queue.put(("error", str(exc)))
+
+        self.content_sync_text.set("جارٍ السحب...")
+        if getattr(self, "_sync_button", None) is not None:
+            self._sync_button.state(["disabled"])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_content_sync_scan(self):
+        """يحدّث قائمة النوافذ من فهرس الخادم - في خيط عامل أيضاً."""
+        if not self.content_sync_url:
+            return
+        base = self.content_sync_url
+        token = str(self._settings.get("content_sync_token", ""))
+
+        def work():
+            try:
+                found = list_windows(base, token)
+                self._sync_queue.put(("windows", [w.get("window", "") for w in found]))
+            except Exception as exc:
+                self._sync_queue.put(("error", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _drain_sync_queue(self):
+        """كل تحديثات المزامنة تحدث هنا في خيط الواجهة."""
+        while True:
+            try:
+                kind, payload = self._sync_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if kind == "error":
+                    self._sync_running = False
+                    if getattr(self, "_sync_button", None) is not None:
+                        self._sync_button.state(["!disabled"])
+                    self.content_sync_text.set("فشل الاتصال")
+                    self._log(f"المزامنة: {payload}")
+                elif kind == "windows":
+                    names = [n for n in payload if n]
+                    if names:
+                        self._sync_windows = names
+                        self._sync_window.set(names[0])
+                        self._log(f"المزامنة: {len(names)} نافذة على الخادم")
+                else:
+                    r = payload
+                    self._sync_running = False
+                    if getattr(self, "_sync_button", None) is not None:
+                        self._sync_button.state(["!disabled"])
+                    if r.cancelled:
+                        self.content_sync_text.set("أُلغيت")
+                    elif r.ok:
+                        # نجح التنزيل: يُفحص مجلد المحتوى فوراً.
+                        if self._content_library is not None:
+                            self._content_library.scan()
+                        self.content_sync_text.set(
+                            f"{r.window}: {r.transferred} جديد، {r.skipped} موجود"
+                        )
+                        self._log(
+                            f"المزامنة {r.window}: {r.transferred} منزَّل "
+                            f"({r.verified} متحقَّق)، {r.skipped} موجود مسبقاً"
+                        )
+                        self._update_content_readout()
+                    else:
+                        self.content_sync_text.set(
+                            f"{r.window}: {r.failed} فشل"
+                        )
+                        self._log(f"المزامنة {r.window}: {r.failed} فشل")
+                    for e in r.errors[:3]:
+                        self._log(f"المزامنة: {e}")
+            except (tk.TclError, KeyError) as e:
+                self._sync_running = False
+                self._log(f"sync queue item {kind} failed: {e}")
+
     def _on_content_rescan(self):
         """يعيد فحص المجلد. مكتبة فارغة حالة صريحة لا صمت."""
         if self._content_library is None:
@@ -831,6 +944,32 @@ class DesktopApp:
         ttk.Label(
             lib,
             textvariable=self.content_library,
+            font=("Segoe UI", 8),
+            foreground="#555",
+        ).pack(side="left", padx=8)
+
+        # السحب من الخادم: نافذة واحدة في المرة، والزر معطّل أثناء العمل.
+        sync = ttk.Frame(box)
+        sync.pack(fill="x", pady=(6, 0))
+        ttk.Label(sync, text="السحب من الخادم:").pack(side="left", padx=(0, 4))
+        self._sync_combo = ttk.Combobox(
+            sync,
+            textvariable=self._sync_window,
+            values=self._sync_windows,
+            state="readonly",
+            width=16,
+        )
+        self._sync_combo.pack(side="left", padx=2)
+        self._sync_button = ttk.Button(
+            sync, text="تحديث", command=self._on_content_sync
+        )
+        self._sync_button.pack(side="left", padx=2)
+        ttk.Button(
+            sync, text="تحديث القائمة", command=self._on_content_sync_scan
+        ).pack(side="left", padx=2)
+        ttk.Label(
+            sync,
+            textvariable=self.content_sync_text,
             font=("Segoe UI", 8),
             foreground="#555",
         ).pack(side="left", padx=8)
@@ -1080,6 +1219,7 @@ class DesktopApp:
         """
         try:
             self._drain_prayer_queue()
+            self._drain_sync_queue()
             now = self.clock.now()
             real_now = self.clock.real_now()
             # تغيّر التاريخ يُقاس بالزمن الحقيقي: قفزة محاكاة عبر منتصف

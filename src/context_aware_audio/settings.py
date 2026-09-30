@@ -29,6 +29,10 @@ DEFAULTS = {
     "content_muted": False,
     "content_volume": 0.85,
     "content_library_dir": "",
+    # سحب المحتوى من الخادم: فارغ = المزامنة معطّلة
+    "content_sync_url": "",
+    "content_sync_token": "",
+    "content_sync_max_parts": 20,
 }
 
 
@@ -99,6 +103,26 @@ def _as_dir(value: Any) -> str:
     return value.strip()[:400]
 
 
+def _as_url(value: Any) -> str:
+    """
+    عنوان خادم المزامنة، أو نص فارغ يعني «المزامنة معطّلة».
+
+    يُقصّ على 300 محرفاً مثل `_as_dir`. لا يُتحقّق من المخطط هنا:
+    مزامنة خاطئة تظهر كرسالة خطأ واضحة، أما رفضُ عنوان صحيح
+    خالٍ من المخطط فيجعل الإعداد مستحيلاً.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().rstrip("/")[:300]
+
+
+def _as_token(value: Any) -> str:
+    """رمز وصول نصّي؛ يُقصّ على 200 محرفاً - الرمز المولَّد 40 حرفاً."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:200]
+
+
 _COERCERS: dict[str, Callable[[Any], Any]] = {
     "master_vol": lambda v: _as_float(v, DEFAULTS["master_vol"], 0.0, 100.0),
     "master_mute": lambda v: _as_bool(v, DEFAULTS["master_mute"]),
@@ -119,6 +143,11 @@ _COERCERS: dict[str, Callable[[Any], Any]] = {
         v, DEFAULTS["content_volume"], 0.0, 1.0
     ),
     "content_library_dir": _as_dir,
+    "content_sync_url": _as_url,
+    "content_sync_token": _as_token,
+    "content_sync_max_parts": lambda v: _as_float(
+        v, DEFAULTS["content_sync_max_parts"], 1.0, 500.0
+    ),
 }
 
 
