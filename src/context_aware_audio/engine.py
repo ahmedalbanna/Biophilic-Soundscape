@@ -9,9 +9,16 @@ engine.py - محرك القرار المركزي (قلب النظام)
 from datetime import datetime
 from typing import Optional
 from .config import EngineConfig
-from .audio_types import AudioFrame, PlaybackCommand, EngineState, DayPeriod
+from .audio_types import (
+    AudioFrame,
+    ContentAction,
+    DayPeriod,
+    EngineState,
+    PlaybackCommand,
+)
 from .cultural_calendar import CulturalCalendar
 from .prayer_engine import PrayerEngine
+from .content_engine import ContentEngine
 
 
 # أدنى نسبة صوت يبقّيها الخفض: لا تنزل تحت 2% فتصمت الخلفية فعلياً،
@@ -24,6 +31,9 @@ class ContextAwareAudioEngine:
         self.config = config or EngineConfig()
         self.calendar = CulturalCalendar(self.config)
         self.prayer = PrayerEngine(self.config)
+        # مسار المحتوى: متعاون لا منافس. المخزن يُحقن لاحقاً من الواجهة
+        # (content_store) لأنه يحتاج مسار بيانات المستخدم لا الإعدادات.
+        self.content = ContentEngine(self.config)
 
         # --- حالة داخلية (timers) ---
         self._last_speech_time: Optional[float] = None  # آخر مرة سُمع فيها كلام
@@ -72,7 +82,10 @@ class ContextAwareAudioEngine:
         prayer_muted, prayer_reason = self.prayer.check(now_dt)
         if prayer_muted:
             self._in_debate_mute = False  # الصلاة تلغي أي حالة أخرى
-            return self._cmd(
+            # الصلاة فوق كل شيء: ينتهي السرد ويُصفَّف قبل الإرجاع،
+            # فلا يبقى مؤقّت معلّق يعيد التشغيل بعد دقائق.
+            _cc = self.content.force_stop(f"🕌 {prayer_reason}")
+            return self._attach(self._cmd(
                 None,
                 0,
                 0.0,
@@ -80,7 +93,7 @@ class ContextAwareAudioEngine:
                 EngineState.PRAYER_MUTED,
                 f"🕌 {prayer_reason}",
                 muted=True,
-            )
+            ), _cc)
 
         # === 2) نقاش حامي > 65dB ===
         if frame.db_level >= cfg.loud_debate_threshold_db and (
@@ -88,7 +101,8 @@ class ContextAwareAudioEngine:
         ):
             self._in_debate_mute = True
             self._last_loud_time = ts
-            return self._cmd(
+            _cc = self.content.force_pause(f"نقاش حامي {frame.db_level:.0f}dB")
+            return self._attach(self._cmd(
                 None,
                 0,
                 0.0,
@@ -96,7 +110,7 @@ class ContextAwareAudioEngine:
                 EngineState.DEBATE_MUTED,
                 f"نقاش حامي {frame.db_level:.0f}dB - كتم تلقائي",
                 muted=True,
-            )
+            ), _cc)
 
         if self._in_debate_mute:
             # انتبه: لا تستخدم `or` هنا - الطابع 0.0 قيمة شرعية وليس غياباً
@@ -107,7 +121,9 @@ class ContextAwareAudioEngine:
             if calm_sec >= cfg.debate_cooldown_sec:
                 self._in_debate_mute = False  # هدأ المجلس 60 ثانية -> عودة
             else:
-                return self._cmd(
+                # المجلس ما زال صاخباً: السرد يبقى متوقفاً
+                _cc = self.content.force_pause("المجلس ما زال صاخباً")
+                return self._attach(self._cmd(
                     None,
                     0,
                     0.0,
@@ -115,21 +131,21 @@ class ContextAwareAudioEngine:
                     EngineState.DEBATE_MUTED,
                     f"انتظار هدوء المجلس ({calm_sec:.0f}/{cfg.debate_cooldown_sec:.0f} ث)",
                     muted=True,
-                )
+                ), _cc)
 
         # === 3) ترحيب ضيوف ===
         if frame.is_greeting_tone:
             self._welcome_until = ts + cfg.welcome_hold_sec
         if ts < self._welcome_until:
             w = cfg.special_sounds["welcome"]
-            return self._cmd(
+            return self._with_content(self._cmd(
                 w["file"],
                 w["db"],
                 cfg.welcome_duck_ratio,
                 cfg.fade_out_duration_sec,
                 EngineState.WELCOME,
                 "ترحيب ضيوف - شلال بعيد",
-            )
+            ), frame, ts, now_dt, period)
 
         # === 4) وضع النوم: ليل + 5 دقائق بلا نشاط ===
         if period == DayPeriod.NIGHT_SLEEP:
@@ -141,7 +157,7 @@ class ContextAwareAudioEngine:
                 night = cfg.period_sounds["night_sleep"]
                 # إيقاف أو صرار خفيف 20dB حسب الإعداد
                 if night["file"] is None:
-                    return self._cmd(
+                    return self._with_content(self._cmd(
                         None,
                         0,
                         0.0,
@@ -149,15 +165,15 @@ class ContextAwareAudioEngine:
                         EngineState.SLEEP_SILENCE,
                         "ليل + سكون 5د - إيقاف تام",
                         muted=True,
-                    )
-                return self._cmd(
+                    ), frame, ts, now_dt, period)
+                return self._with_content(self._cmd(
                     night["file"],
                     night["db"],
                     1.0,
                     cfg.fade_in_duration_sec,
                     EngineState.SLEEP_SILENCE,
                     "ليل + سكون 5د - صرار خفيف 20dB",
-                )
+                ), frame, ts, now_dt, period)
 
         # === 5) هدوء مفاجئ > 10 ثوانٍ -> Fade-In ===
         if not frame.is_speech and self._silence_since is not None:
@@ -166,36 +182,36 @@ class ContextAwareAudioEngine:
                 # في المقيل: ريح البن، وإلا الصوت اليومي المعتاد
                 if period == DayPeriod.MAQIL:
                     c = cfg.special_sounds["contemplation"]
-                    return self._cmd(
+                    return self._with_content(self._cmd(
                         c["file"],
                         c["db"],
                         1.0,
                         cfg.fade_in_duration_sec,
                         EngineState.CONTEMPLATION_FADE,
                         f"هدوء {silence_sec:.0f}ث - Fade-In ريح البن",
-                    )
-                return self._cmd(
+                    ), frame, ts, now_dt, period)
+                return self._with_content(self._cmd(
                     base["file"],
                     base["db"],
                     1.0,
                     cfg.fade_in_duration_sec,
                     EngineState.CONTEMPLATION_FADE,
                     f"هدوء {silence_sec:.0f}ث - عودة تدريجية",
-                )
+                ), frame, ts, now_dt, period)
 
         # === 6) Ducking أثناء الكلام العادي ===
         if frame.is_speech and base.get("file"):
             ratio = self._duck_ratio(frame.db_level, frame.threshold_db)
             self._last_duck_time = ts
             self._last_duck_ratio = ratio
-            return self._cmd(
+            return self._with_content(self._cmd(
                 base["file"],
                 base["db"],
                 ratio,
                 cfg.fade_out_duration_sec,
                 EngineState.DUCKED,
                 f"كلام {frame.db_level:.0f}dB - خفض {(1 - ratio) * 100:.0f}%",
-            )
+            ), frame, ts, now_dt, period)
 
         # === 6b) نافذة الخفض بعد الكلام ===
         # زفير 0.8ث كان يرسل الخلفية إلى 100% فوراً: يحرر الكلام بعد
@@ -206,19 +222,19 @@ class ContextAwareAudioEngine:
             and self._last_duck_time is not None
             and ts - self._last_duck_time < cfg.duck_hold_sec
         ):
-            return self._cmd(
+            return self._with_content(self._cmd(
                 base["file"],
                 base["db"],
                 self._last_duck_ratio,
                 cfg.fade_in_duration_sec,
                 EngineState.DUCKED,
                 f"استمرار الخفض {cfg.duck_hold_sec:.0f}ث",
-            )
+            ), frame, ts, now_dt, period)
 
         # === 7) الوضع اليومي الافتراضي ===
         if base.get("file") is None:
             # فترة كتم مجدولة (المغرب/العشاء خارج الصلاة)
-            return self._cmd(
+            return self._with_content(self._cmd(
                 None,
                 0,
                 0.0,
@@ -226,15 +242,68 @@ class ContextAwareAudioEngine:
                 EngineState.DAILY_AMBIENT,
                 "فترة عبادة - خلفية متوقفة",
                 muted=True,
-            )
-        return self._cmd(
+            ), frame, ts, now_dt, period)
+        return self._with_content(self._cmd(
             base["file"],
             base["db"],
             1.0,
             cfg.fade_in_duration_sec,
             EngineState.DAILY_AMBIENT,
             f"وضع يومي: {base.get('label', '')}",
+        ), frame, ts, now_dt, period)
+
+    @staticmethod
+    def _attach(cmd, decision):
+        """
+        يضع قرار المحتوى على أمر الخلفية بلا تغيير مستوى الخلفية.
+
+        prayer و debate يخرجان قبل _with_content، فيستدعيان المحرك
+        بأنفسهما. لولا هذا المساعد لابتلع force_stop نتيجته: ينتهي
+        السرد في الذاكرة ويظل المشغّل يبثّه.
+        """
+        cmd.content_file = decision.file
+        cmd.content_action = decision.action
+        cmd.content_volume = decision.volume
+        cmd.content_position_sec = decision.position_sec
+        if decision.action is not ContentAction.NONE:
+            cmd.reason = f"{cmd.reason} | {decision.reason}"
+        return cmd
+
+    def _with_content(self, cmd, frame, ts, now, period):
+        """
+        البوابة الوحيدة لمسار المحتوى.
+
+        تُستدعى من كل فرع يُخرج خلفية. فرعا الكتم (الصلاة والنقاش
+        الحامي) لا يمران بها: الصلاة تُوقف السرد صراحةً، والنقاش
+        يوقفه مؤقتاً. المحتوى متعاون لا منافس، فلا يدخل سلسلة
+        الأولويات.
+
+        نسبة الخلفية تُستبدل لا تُضرب. الضرب مع منحنى الخفض يجعل
+        0.20 × 0.10 = 2% أي صمت تام، والخلفية تخفت تحت السرد ولا
+        تختفي.
+        """
+        decision = self.content.update(
+            frame, ts, now, period, enabled=self.config.content_enabled
         )
+        # حقول المحتوى تُملأ في كل نبضة: المشغّل يحتاج الملف والموقع
+        # في كل نبضة لا في نبضة الانتقال وحدها، وقراءة الواجهة كذلك.
+        cmd.content_file = decision.file
+        cmd.content_volume = decision.volume
+        cmd.content_position_sec = decision.position_sec
+
+        # أرضية الخلفية تُطبَّق ما دام المسار مسموعاً، لا عند الانتقال
+        # فقط. الرجوع المبكر على NONE كان يرفع الخلفية إلى 100% في
+        # النبضة التالية للبدء، فيسمع السرد فوق خلفية كاملة ثم
+        # تخفت بعده.
+        if decision.is_audible and not cmd.is_muted:
+            cmd.volume_ratio = self.config.content_ambient_ratio
+
+        if decision.action is not ContentAction.NONE:
+            cmd.content_action = decision.action
+            cmd.reason = f"{cmd.reason} | {decision.reason}"
+        elif decision.is_audible and decision.reason:
+            cmd.reason = f"{cmd.reason} | {decision.reason}"
+        return cmd
 
     # ---------- أدوات ----------
     def _duck_ratio(self, db: float, threshold_db: float) -> float:
@@ -305,3 +374,4 @@ class ContextAwareAudioEngine:
         self._last_duck_ratio = 1.0
         self._last_activity_time = None
         self._last_command = None
+        self.content.reset()

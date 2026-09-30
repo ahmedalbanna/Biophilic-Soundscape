@@ -127,7 +127,9 @@ class ContentEngine:
             return ContentDecision(
                 action=ContentAction.PAUSE,
                 file=self.current_file,
+                volume=self.config.content_volume,
                 position_sec=self._position_sec,
+                is_audible=True,
                 reason=reason or "توقّف مؤقت للنقاش الحامي",
                 state=self.state,
             )
@@ -146,8 +148,14 @@ class ContentEngine:
         if not enabled:
             return self.force_stop("المحتوى معطّل")
 
-        # حصيلة الموضع قبل أي انتقال: نبضة واحدة تكفي لحساب الزمن
-        if self._clip is not None and self._last_ts is not None:
+        # حصيلة الموضع قبل أي انتقال: نبضة واحدة تكفي لحساب الزمن.
+        # أثناء PLAYING فقط. لو تقدّم والمقطع متوقف لبلغ نهاية مدته
+        # والسرد لم يُسمع منه حرف: المقاطعة كانت تُنهيه بصمت.
+        if (
+            self._clip is not None
+            and self._last_ts is not None
+            and self.state == ContentState.PLAYING
+        ):
             self._position_sec = max(
                 0.0, self._position_sec + max(0.0, ts - self._last_ts)
             )
@@ -170,7 +178,7 @@ class ContentEngine:
         if self.is_running:
             if window_key is None or window_key != self._window_key:
                 return self._stop_for_window_change(now, window_key)
-            return self._update_playing(frame, ts, quiet_for)
+            return self._update_playing(frame, ts, now, quiet_for)
 
         return self._update_idle(frame, ts, now, period, window_key, quiet_for, loud)
 
@@ -194,7 +202,7 @@ class ContentEngine:
         )
 
     def _update_playing(
-        self, frame: AudioFrame, ts: float, quiet_for: float
+        self, frame: AudioFrame, ts: float, now: datetime, quiet_for: float
     ) -> ContentDecision:
         # --- الانتهاء: يُفحص قبل المقاطعة ---
         # لو انتهى المقطع في نفس إطار الكلام، الأولوية للإنهاء: المقطع
@@ -202,7 +210,7 @@ class ContentEngine:
         if self._position_sec >= self.duration_sec:
             title = self.current_title
             finished_at = self._position_sec
-            self._close_log(OUTCOME_COMPLETED, now=None, position=finished_at)
+            self._close_log(OUTCOME_COMPLETED, now=now, position=finished_at)
             self._clip = None
             self._log_id = None
             self._position_sec = 0.0
@@ -217,7 +225,10 @@ class ContentEngine:
             )
 
         # --- المقاطعة ---
-        if frame.is_speech:
+        if frame.is_speech and self.state == ContentState.PLAYING:
+            # التراجع مرّة واحدة عند الانتقال. كان يُعاد كل إطار أثناء
+            # الكلام، فسحب 3 ثوانٍ كل 200ms حتى بدا السرد قد بدأ من
+            # الصفر كلما دام الكلام.
             self._rewind()
             self.state = ContentState.PAUSED_INTERRUPT
             # نبدأ عدّ الهدوء من لحظة التوقّف لا من آخر هدوء عام في
@@ -228,7 +239,12 @@ class ContentEngine:
             return ContentDecision(
                 action=ContentAction.PAUSE,
                 file=self.current_file,
+                volume=self.config.content_volume,
                 position_sec=self._position_sec,
+                # الخلفية تبقى خافتة أثناء التوقّف أيضاً، نصاً للمواصفة:
+                # السرد معلّق لا ملغى، فارتفاع الخلفية الآن يوحي
+                # بأنه غادر المطهر.
+                is_audible=True,
                 reason=(f"مقاطعة كلام -> تراجع {self.config.content_rewind_sec:.0f}ث"),
                 state=self.state,
             )
@@ -382,9 +398,7 @@ class ContentEngine:
         """هل مضت فجوة content_min_gap_min منذ آخر بث في هذه النافذة؟"""
         if self.store is None:
             return True
-        last = self.store.last_started(
-            window_key, exclude_outcome=OUTCOME_ABANDONED
-        )
+        last = self.store.last_started(window_key, exclude_outcome=OUTCOME_ABANDONED)
         if not last:
             return True
         try:

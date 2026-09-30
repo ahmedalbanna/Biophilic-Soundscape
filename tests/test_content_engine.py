@@ -226,6 +226,35 @@ check(
 )
 done(tmp, store)
 
+# ===== 3c) المؤشر يقف أثناء المقاطعة =====
+# المؤشر كان يتقدّم في كل الحالات، فبلغ المقطع نهايته والسرد متوقف:
+# المقاطعة كانت تُنهي النص بلا أن يُسمع منه حرف.
+tmp, eng, store, cfg = build(period_files=[("maqil_story__001__long.wav", 8.0)])
+clock = Clock()
+run(eng, clock, DayPeriod.MAQIL, 12.0)
+run(eng, clock, DayPeriod.MAQIL, 1.0)
+check("paused clock: playing before", eng.state == ContentState.PLAYING, eng.state)
+now, ts = clock.tick()
+eng.update(frame(50.0, speech=True), ts, now, DayPeriod.MAQIL)
+held = eng.position_sec
+check("paused clock: paused", eng.state == ContentState.PAUSED_INTERRUPT, eng.state)
+# الكلام يتوقف، ثم صمت أقل من content_resume_quiet_sec: ما زلنا
+# معطّفين، فالمؤشر يجب ألا يزحزح. بلا الحارس كان يبلغ 4 ثوانٍ
+# ويبلغ حدّ المقطع والسرد واقف.
+d, seen = run(eng, clock, DayPeriod.MAQIL, 4.0)
+check(
+    "paused clock: the playhead does not advance while interrupted",
+    abs(eng.position_sec - held) < 0.01,
+    f"{held:.2f} -> {eng.position_sec:.2f}",
+)
+check(
+    "paused clock: the clip is not finished while paused",
+    ContentAction.FINISHED not in seen,
+    seen,
+)
+check("paused clock: still paused", eng.state == ContentState.PAUSED_INTERRUPT, eng.state)
+done(tmp, store)
+
 # ===== 4) البوابة: تأجيل ثم إقصاء =====
 tmp, eng, store, cfg = build()
 clock = Clock()
