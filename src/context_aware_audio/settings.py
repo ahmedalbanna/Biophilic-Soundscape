@@ -23,6 +23,7 @@ DEFAULTS = {
     "athan_enabled": True,
     "sim_offset_sec": 0.0,
     "sim_enabled": False,
+    "duck_depth": 70.0,
 }
 
 
@@ -91,6 +92,8 @@ _COERCERS: dict[str, Callable[[Any], Any]] = {
         v, DEFAULTS["sim_offset_sec"], -86_400.0, 86_400.0
     ),
     "sim_enabled": lambda v: _as_bool(v, DEFAULTS["sim_enabled"]),
+    # عمق الخفض: نسبة مئوية بين 0 و100، ما عدا 0 فهو بلا خفض
+    "duck_depth": lambda v: _as_float(v, DEFAULTS["duck_depth"], 0.0, 95.0),
 }
 
 

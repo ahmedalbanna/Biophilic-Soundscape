@@ -14,6 +14,9 @@ from .cultural_calendar import CulturalCalendar
 from .prayer_engine import PrayerEngine
 
 
+# أدنى نسبة صوت يبقّيها الخفض: لا تنزل تحت 2% فتصمت الخلفية فعلياً،
+# وهدوء ناعم هو كل ما نريده. الكتم التام حكر على نافذة الصلاة والنقاش.
+MIN_DUCK_RATIO = 0.02
 class ContextAwareAudioEngine:
     """محرك الصوت التكيفي - النسخة اليمنية"""
 
@@ -28,6 +31,9 @@ class ContextAwareAudioEngine:
         self._last_loud_time: Optional[float] = None  # آخر صوت > 65dB
         self._in_debate_mute: bool = False
         self._welcome_until: float = 0.0
+        # نافذة الخفض: آخر لحظة خُفض فيها الصوت، وآخر نسبة خُفض إليها
+        self._last_duck_time: Optional[float] = None
+        self._last_duck_ratio: float = 1.0
         self._last_activity_time: Optional[float] = None  # أي صوت فوق العتبة الدنيا
         self._last_command: Optional[PlaybackCommand] = None
 
@@ -179,7 +185,9 @@ class ContextAwareAudioEngine:
 
         # === 6) Ducking أثناء الكلام العادي ===
         if frame.is_speech and base.get("file"):
-            ratio = self._duck_ratio(frame.db_level)
+            ratio = self._duck_ratio(frame.db_level, frame.threshold_db)
+            self._last_duck_time = ts
+            self._last_duck_ratio = ratio
             return self._cmd(
                 base["file"],
                 base["db"],
@@ -187,6 +195,24 @@ class ContextAwareAudioEngine:
                 cfg.fade_out_duration_sec,
                 EngineState.DUCKED,
                 f"كلام {frame.db_level:.0f}dB - خفض {(1 - ratio) * 100:.0f}%",
+            )
+
+        # === 6b) نافذة الخفض بعد الكلام ===
+        # زفير 0.8ث كان يرسل الخلفية إلى 100% فوراً: يحرر الكلام بعد
+        # 0.4ث، ثم ترفض التهدئة (3ث) إعادة التأكيد، فتنقلب الحالة بلا
+        # سبب مرئي. نُبقي الخفض duck_hold_sec قبل الصعود.
+        if (
+            base.get("file")
+            and self._last_duck_time is not None
+            and ts - self._last_duck_time < cfg.duck_hold_sec
+        ):
+            return self._cmd(
+                base["file"],
+                base["db"],
+                self._last_duck_ratio,
+                cfg.fade_in_duration_sec,
+                EngineState.DUCKED,
+                f"استمرار الخفض {cfg.duck_hold_sec:.0f}ث",
             )
 
         # === 7) الوضع اليومي الافتراضي ===
@@ -211,18 +237,44 @@ class ContextAwareAudioEngine:
         )
 
     # ---------- أدوات ----------
-    def _duck_ratio(self, db: float) -> float:
-        """كلما ارتفع الصوت زاد الخفض: 40dB->30% ، 65dB->10%"""
-        cfg = self.config
-        lo, hi = cfg.speech_threshold_db, cfg.loud_debate_threshold_db
+    def _duck_ratio(self, db: float, threshold_db: float) -> float:
+        """
+        كلما ارتفع الصوت عن العتبة السارية زاد الخفض.
+
+        المحور السفلي هو العتبة التي هبط عنها الصوت، لا قيمة ثابتة
+        من الإعدادات. كان شكل المنحنى يقوده حقل إعدادات لا علاقة له
+        بالقرار الذي يطلقه: في غرفة أرضيتها 30dB تكون العتبة 42،
+        ومع ذلك يبدأ المنحنى عند 40 - أي قبل حدّ الكلام، فلا يقع
+        أقصى خفض إلا في نطاق ضيق بلا أثر مسموع.
+
+        التثبيت على العتبة يجعل أقصى خفض يقع عند حدّ الكلام تماماً،
+        ويبقى 90% محجوزة لآخر 0.5dB قبل كتم النقاش. الحدّ الأعلى
+        لا يتغير: 65dB قرار صريح لا منحنى.
+        """
+        lo, hi = threshold_db, self.config.loud_debate_threshold_db
+        top = self.duck_max_ratio()
+        bottom = self.duck_min_ratio()
         if db <= lo:
-            return cfg.ducking_max_ratio
+            return top
         if db >= hi:
-            return cfg.ducking_min_ratio
+            return bottom
         t = (db - lo) / max(hi - lo, 1e-6)
-        return cfg.ducking_max_ratio - t * (
-            cfg.ducking_max_ratio - cfg.ducking_min_ratio
-        )
+        return top - t * (top - bottom)
+
+    def duck_max_ratio(self) -> float:
+        """أقصى خفض: ما تبقّى من الصوت عند حدّ الكلام."""
+        return max(0.0, 1.0 - self.config.duck_depth / 100.0)
+
+    def duck_min_ratio(self) -> float:
+        """
+        أقل نسبة يبقاها الخفض، أي أقصى شدة.
+
+        تُشتق من العمق بنسبة ثابتة (ثلث) لا قيمة مستقلة: عمق 90%
+        عند 65dB غير قابل للوصول أصلاً لأن كتم النقاش يبدأ عندها
+        بالضبط، فلا معنى لحقل يعد بعمق لا يستطيع بلوغه. «عميق» هنا
+        تعني متحدثاً واحداً بصوت عالٍ أو تلفازاً، لا حشداً من الناس.
+        """
+        return max(MIN_DUCK_RATIO, self.duck_max_ratio() / 3.0)
 
     def _cmd(
         self, file, db, ratio, fade, state, reason, muted=False
@@ -249,5 +301,7 @@ class ContextAwareAudioEngine:
         self._last_loud_time = None
         self._in_debate_mute = False
         self._welcome_until = 0.0
+        self._last_duck_time = None
+        self._last_duck_ratio = 1.0
         self._last_activity_time = None
         self._last_command = None

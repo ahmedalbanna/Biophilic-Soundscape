@@ -265,11 +265,15 @@ class RealPlayer:
                         print(action)
                 else:
                     if abs(eff - self.current_volume) >= 0.01:
+                        # بلا سقف هنا: مدة التدرّج قرار المحرك من
+                        # fade_in_duration_sec. كان min(..., 1.5) يقصّ
+                        # 3.0 إلى 1.5 بصمت، فيختلف الإعداد والشيفرة بلا
+                        # أثر مرئي. طبقة الصوت تُنفّذ ولا تعيد السياسة.
                         self._ramp_volume(
                             self._active_idx,
                             self.current_volume,
                             eff,
-                            min(cmd.fade_duration_sec or 0.3, 1.5),
+                            cmd.fade_duration_sec or 0.3,
                         )
                         action = f"FADE {cmd.file} {self.current_volume:.0%}->{eff:.0%}"
                     else:

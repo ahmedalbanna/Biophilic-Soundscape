@@ -538,5 +538,331 @@ check("one unvoiced frame does not drop confirmed speech", _f.is_speech, str(_f)
 check("elapsed: backwards stamp is clamped to zero", not elapsed(10.0, 20.0, 0.2))
 check("elapsed: normal span still passes", elapsed(20.2, 20.0, 0.2))
 
+# 14) نافذة الخفض: زفير قصير لا يرسل الخلفية إلى 100%
+from src.context_aware_audio.vad import VadProcessor
+
+STEP = 0.2
+
+
+def make_talking(floor=50.0, frames=6):
+    """محرك يتكلم الآن: المحرك والمعالج بطوابع محقونة."""
+    cfg = EngineConfig()
+    e = ContextAwareAudioEngine(cfg)
+    e.prayer.set_times(
+        {
+            "fajr": dtime(5, 10),
+            "dhuhr": dtime(12, 5),
+            "asr": dtime(15, 25),
+            "maghrib": dtime(18, 10),
+            "isha": dtime(19, 30),
+        }
+    )
+    v = VadProcessor(cfg)
+    t = 3000.0
+    for _ in range(frames):
+        e.process_frame(v.analyze_frame(floor, timestamp=t), day_at(15, 0))
+        t += STEP
+    return e, v, t
+
+
+# زفير 0.8ث: كان يقلب الحالة إلى daily_ambientratio=1.0
+_e, _v, _t = make_talking()
+check("duck: talking is ducked", _e._last_command.state == EngineState.DUCKED)
+_breath = []
+for _ in range(4):  # 0.8ث
+    _c = _e.process_frame(_v.analyze_frame(20.0, timestamp=_t), day_at(15, 0))
+    _breath.append(_c)
+    _t += STEP
+check(
+    "duck: a 0.8s breath stays ducked",
+    all(c.state == EngineState.DUCKED for c in _breath),
+    [c.state.value for c in _breath],
+)
+check(
+    "duck: the breath never returns full volume",
+    all(c.volume_ratio < 1.0 for c in _breath),
+    [round(c.volume_ratio, 2) for c in _breath],
+)
+check(
+    "duck: the hold keeps the last ratio, not a jump",
+    len({round(c.volume_ratio, 3) for c in _breath}) == 1,
+    [round(c.volume_ratio, 3) for c in _breath],
+)
+
+# انتهاء النافذة: الموسيقى تعود
+for _ in range(20):
+    _c = _e.process_frame(_v.analyze_frame(20.0, timestamp=_t), day_at(15, 0))
+    _t += STEP
+check("duck: after the hold the music returns", _c.state == EngineState.DAILY_AMBIENT,
+      _c.state.value)
+check("duck: and at full volume", _c.volume_ratio == 1.0, _c.volume_ratio)
+
+# النافذة أقصر من صمت التأمل فلا تطغى عليه
+check("duck_hold_sec is below the silence window",
+      EngineConfig().duck_hold_sec < EngineConfig().silence_for_fade_in_sec)
+_e2, _v2, _t2 = make_talking()
+for _ in range(60):  # 12ث
+    _c2 = _e2.process_frame(_v2.analyze_frame(20.0, timestamp=_t2), day_at(15, 0))
+    _t2 += STEP
+check("duck: the 10s contemplation fade still wins",
+      _c2.state == EngineState.CONTEMPLATION_FADE, _c2.state.value)
+
+# الصلاة تعلو النافذة
+_e3, _v3, _t3 = make_talking()
+_c3 = _e3.process_frame(_v3.analyze_frame(20.0, timestamp=_t3), day_at(18, 10))
+check("duck: prayer outranks the hold",
+      _c3.state == EngineState.PRAYER_MUTED, _c3.state.value)
+
+# reset يصفّر النافذة
+_e4, _v4, _t4 = make_talking()
+check("duck: hold is set before reset", _e4._last_duck_time is not None)
+_e4.reset()
+check("duck: reset clears _last_duck_time", _e4._last_duck_time is None)
+check("duck: reset clears the stored ratio", _e4._last_duck_ratio == 1.0)
+_v4.reset()
+_c4 = _e4.process_frame(_v4.analyze_frame(20.0, timestamp=_t4), day_at(15, 0))
+check("duck: after reset a silent frame is not a hold",
+      _c4.state == EngineState.DAILY_AMBIENT, _c4.state.value)
+
+# نافذة صفرية = السلوك القديم: إثبات أن الاختبار يلتقط العطل
+_holdless = EngineConfig()
+_holdless.duck_hold_sec = 0.0
+_e5 = ContextAwareAudioEngine(_holdless)
+_e5.prayer.set_times(
+    {
+        "fajr": dtime(5, 10),
+        "dhuhr": dtime(12, 5),
+        "asr": dtime(15, 25),
+        "maghrib": dtime(18, 10),
+        "isha": dtime(19, 30),
+    }
+)
+_v5 = VadProcessor(_holdless)
+_t5 = 3000.0
+for _ in range(6):
+    _e5.process_frame(_v5.analyze_frame(50.0, timestamp=_t5), day_at(15, 0))
+    _t5 += STEP
+_states = []
+for _ in range(4):
+    _states.append(
+        _e5.process_frame(_v5.analyze_frame(20.0, timestamp=_t5), day_at(15, 0)).state
+    )
+    _t5 += STEP
+check(
+    "duck: with the hold disabled the breath does snap to ambient (regression proof)",
+    EngineState.DAILY_AMBIENT in _states,
+    [s.value for s in _states],
+)
+
+
+
+# 15) تتبّع أرضية الضجيج + منحنى مربوط بالعتبة + عمق الخفض
+
+
+STEP = 0.2
+
+
+def day_at(h, m=0):
+    """وقت بعيد عن كل نافذة صلاة."""
+    return datetime.now().replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+
+def feed(v, db, n, t):
+    for _ in range(n):
+        v.analyze_frame(db, timestamp=t)
+        t += STEP
+    return t
+
+
+# ===== P2: تتبّع أرضية الضجيج =====
+# في هذه الغرفة الأرضية 3.5dB والعتبة 40، فالهامش 12dB لا أثر له.
+# defence الحقيقية أنه يصيرLever إذا تجاوزت الأرضية 28dB.
+v = VadProcessor(EngineConfig())
+t = feed(v, 3.5, 200, 6000.0)
+check("floor: tracks a quiet room", abs(v._live_floor_db - 3.5) < 0.1, v._live_floor_db)
+check(
+    "floor: a 3.5dB room leaves the threshold at 40",
+    v.speech_threshold() == 40.0,
+    v.speech_threshold(),
+)
+
+v2 = VadProcessor(EngineConfig())
+t2 = feed(v2, 30.0, 200, 6000.0)
+check(
+    "floor: tracks a loud room", abs(v2._live_floor_db - 30.0) < 0.1, v2._live_floor_db
+)
+check(
+    "floor: a 30dB room raises the threshold to 42",
+    v2.speech_threshold() == 42.0,
+    v2.speech_threshold(),
+)
+
+# الكلام في غرفة صاخبة يبقى مكتشفاً، والعتبة لا تهرب
+t3 = t2
+for _ in range(4):
+    f = v2.analyze_frame(45.0, timestamp=t3)
+    t3 += STEP
+check("floor: speech detected above a raised threshold", f.is_speech, str(f))
+check(
+    "floor: the threshold did not run away",
+    v2.speech_threshold() == 42.0,
+    v2.speech_threshold(),
+)
+
+# عشر دقائق من الكلام: لا حلقة ارتداد
+v3 = VadProcessor(EngineConfig())
+t3b = feed(v3, 3.5, 200, 6000.0)
+_before = v3.speech_threshold()
+for _ in range(3000):
+    f3 = v3.analyze_frame(45.0, timestamp=t3b)
+    t3b += STEP
+check(
+    "floor: no runaway after 10 minutes of speech",
+    v3.speech_threshold() == _before,
+    v3.speech_threshold(),
+)
+check("floor: speech still detected at the end", f3.is_speech)
+
+# باب يُغلق مرة واحدة: الوسيط يتجاهله
+v4 = VadProcessor(EngineConfig())
+t4 = feed(v4, 3.5, 200, 6000.0)
+_floor_before = v4._live_floor_db
+t4 = feed(v4, 95.0, 1, t4)
+t4 = feed(v4, 3.5, 100, t4)
+check(
+    "floor: one door slam does not move the median",
+    v4._live_floor_db == _floor_before,
+    f"{_floor_before} -> {v4._live_floor_db}",
+)
+check(
+    "floor: the sample window is bounded",
+    len(v4._floor_samples) <= v4._max_floor_samples(),
+    f"{len(v4._floor_samples)} vs {v4._max_floor_samples()}",
+)
+
+# عينة واحدة قد تكون قفزة باب فلا تصلح أساساً
+v5 = VadProcessor(EngineConfig())
+v5.analyze_frame(90.0, timestamp=6000.0)
+check("floor: one sample is not enough", v5._live_floor_db is None, v5._live_floor_db)
+check("floor: threshold stays at base", v5.speech_threshold() == 40.0)
+
+# البذر اليدوي يعمل ثم يتجاوزه التتبّع
+v6 = VadProcessor(EngineConfig())
+v6.set_noise_floor(35.0)
+check(
+    "floor: manual seed raises the threshold",
+    v6.speech_threshold() == 47.0,
+    v6.speech_threshold(),
+)
+t6 = feed(v6, 3.5, 200, 6000.0)
+check(
+    "floor: tracking takes over from the seed",
+    v6.speech_threshold() == 40.0,
+    v6.speech_threshold(),
+)
+check("floor: the manual seed is kept on record", v6._manual_floor_db == 35.0)
+
+# reset يصفّر التتبّع ويبقي البذر
+v7 = VadProcessor(EngineConfig())
+v7.set_noise_floor(20.0)
+feed(v7, 3.5, 200, 6000.0)
+v7.reset()
+check("floor: reset clears the live floor", v7._live_floor_db is None)
+check("floor: reset clears the samples", len(v7._floor_samples) == 0)
+check("floor: reset keeps the manual seed", v7._manual_floor_db == 20.0)
+
+
+# ===== P3: منحنى الخفض مربوط بالعتبة السارية =====
+def noisy_engine(floor_db=30.0):
+    cfg = EngineConfig()
+    e = ContextAwareAudioEngine(cfg)
+    e.prayer.set_times(
+        {
+            "fajr": dtime(5, 10),
+            "dhuhr": dtime(12, 5),
+            "asr": dtime(15, 25),
+            "maghrib": dtime(18, 10),
+            "isha": dtime(19, 30),
+        }
+    )
+    v = VadProcessor(cfg)
+    t = feed(v, floor_db, 200, 6000.0)
+    return e, v, cfg, t
+
+
+_e, _v, _cfg, _t = noisy_engine()
+_thr = _v.speech_threshold()
+check("curve: the noisy-room threshold is 42", _thr == 42.0, _thr)
+check(
+    "curve: max reduction sits exactly at the threshold",
+    abs(_e._duck_ratio(_thr, _thr) - _cfg.ducking_max_ratio) < 1e-9,
+    _e._duck_ratio(_thr, _thr),
+)
+check(
+    "curve: the curve does not start below speech",
+    abs(_e._duck_ratio(_thr - 2, _thr) - _cfg.ducking_max_ratio) < 1e-9,
+    _e._duck_ratio(_thr - 2, _thr),
+)
+check(
+    "curve: 64.9dB is essentially the minimum",
+    abs(_e._duck_ratio(64.9, _thr) - _cfg.ducking_min_ratio) < 0.002,
+    _e._duck_ratio(64.9, _thr),
+)
+
+# المحرك يمرّر العتبة الحيّة لا قيمة الإعدادات الثابتة
+# عند 42dB بالضبط (عتبة الغرفة الصاخبة) يجب أن يعطي أقصى خفض
+_e2, _v2, _cfg2, _t2b = noisy_engine()
+_thr2 = _v2.speech_threshold()
+for _ in range(4):
+    _c = _e2.process_frame(
+        _v2.analyze_frame(_thr2, timestamp=_t2b), day_at(15, 0)
+    )
+    _t2b += STEP
+check(
+    "curve: the engine uses the live threshold, not the config constant",
+    abs(_c.volume_ratio - _cfg2.ducking_max_ratio) < 1e-6,
+    f"{_c.volume_ratio} vs {_cfg2.ducking_max_ratio}",
+)
+check(
+    "curve: speaking at the threshold is ducked",
+    _c.state == EngineState.DUCKED,
+    _c.state.value,
+)
+
+# ===== P5: عمق الخفض =====
+for depth, expect_max_cut in ((60.0, 60.0), (70.0, 70.0), (80.0, 80.0)):
+    _c3 = EngineConfig()
+    _c3.duck_depth = depth
+    _e3 = ContextAwareAudioEngine(_c3)
+    _got = (1.0 - _e3.duck_max_ratio()) * 100
+    check(
+        f"depth: {depth:.0f}% preset gives {expect_max_cut:.0f}% max cut",
+        abs(_got - expect_max_cut) < 0.01,
+        _got,
+    )
+
+_c4 = EngineConfig()
+_c4.duck_depth = 80.0
+_e4 = ContextAwareAudioEngine(_c4)
+_min_cut = (1.0 - _e4.duck_min_ratio()) * 100
+check("depth: 80% preset peaks below 95% (no promise of 90)", _min_cut < 95.0, _min_cut)
+check("depth: min ratio is floored", _e4.duck_min_ratio() >= 0.02, _e4.duck_min_ratio())
+
+# 90% لا يمكن بلوغها عند 65dB: قرار صريح لا منحنى
+_c5 = EngineConfig()
+_c5.duck_depth = 80.0
+_e5 = ContextAwareAudioEngine(_c5)
+_v5 = VadProcessor(_c5)
+_t5 = feed(_v5, 3.5, 200, 6000.0)
+for _ in range(4):
+    _c6 = _e5.process_frame(_v5.analyze_frame(65.0, timestamp=_t5), day_at(15, 0))
+    _t5 += STEP
+check(
+    "depth: 65dB is a hard mute, never a 90% duck",
+    _c6.state == EngineState.DEBATE_MUTED,
+    _c6.state.value,
+)
+
 print(f"\nالنتيجة: {PASSED} ناجح / {FAILED} فاشل")
 sys.exit(1 if FAILED else 0)

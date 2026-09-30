@@ -35,6 +35,7 @@ PASSED = FAILED = 0
 _real_settings_path = assets_dir() / "settings.json"
 _real_size = _real_settings_path.stat().st_size if _real_settings_path.exists() else 0
 
+
 def check(name, cond, extra=""):
     global PASSED, FAILED
     if cond:
@@ -765,11 +766,16 @@ try:
         ("talk", 50.0),
     ):
         _app._scenario(kind)
+        # القيمة المثمَّنة تُقرأ من الحقل لا من _scenario_db(): الأخيرة
+        # تفحص مهلة زمنية، فعلى تشغيل بارد (ترجمة الشيفرة أول مرة) قد
+        # تنقضي الثواني الثلاث قبل السطر التالي ويفشل اختبار سليم.
         check(
             f"scenario {kind}: pinned db == {expected:.0f}",
-            _app._scenario_db() == expected,
-            _app._scenario_db(),
+            _app._scenario_db_value == expected,
+            _app._scenario_db_value,
         )
+        # ثم نجعل التثبيت سارياً قطعاً لاختبار مسار القراءة
+        _app._scenario_until = _time.time() + 60
         check(
             f"scenario {kind}: shown db == {expected:.0f}",
             _app._current_db() == expected,
@@ -1071,9 +1077,7 @@ import time as _time
 # فلا يظهر التغيير في git status بينما يفسد إعدادات المستخدم فعلياً.
 _sim_home = tempfile.mkdtemp()
 try:
-    with mock.patch.object(
-        settings, "writable_path", lambda n: Path(_sim_home) / n
-    ):
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_sim_home) / n):
         _root2 = tk.Tk()
         _root2.withdraw()
         try:
@@ -1169,7 +1173,8 @@ try:
             check(
                 "sim: readout shows both clocks",
                 "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
-                and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
+                and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a"
+                in _app2.sim_readout.get(),
                 _app2.sim_readout.get(),
             )
 
@@ -1320,8 +1325,12 @@ try:
 
     _a4 = DesktopApp(_r4, log_path=None)
     _cmd4 = PlaybackCommand(
-        file=None, target_db=0, volume_ratio=0.0, fade_duration_sec=0.0,
-        state=EngineState.DUCKED, reason="t",
+        file=None,
+        target_db=0,
+        volume_ratio=0.0,
+        fade_duration_sec=0.0,
+        state=EngineState.DUCKED,
+        reason="t",
     )
     _now4 = _a4.clock.now()
     for _raw, _conf, _want in (
@@ -1339,9 +1348,11 @@ try:
         )
     # المؤشران متفقان فلا فائدة من عرض الخام
     _a4._update_readouts(_now4, _cmd4, 50.0, True, True)
-    check("readout omits the flag when both agree",
-          "\u062e\u0627\u0645=" not in _a4.db_label.cget("text"),
-          _a4.db_label.cget("text"))
+    check(
+        "readout omits the flag when both agree",
+        "\u062e\u0627\u0645=" not in _a4.db_label.cget("text"),
+        _a4.db_label.cget("text"),
+    )
     _a4.stop()
 finally:
     try:
@@ -1367,9 +1378,7 @@ check(
 # المربع لاحقاً: مخاطرة الظهور فجأة بلا سبب ظاهر للمستخدم.
 _sim_home2 = tempfile.mkdtemp()
 try:
-    with mock.patch.object(
-        settings, "writable_path", lambda n: Path(_sim_home2) / n
-    ):
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_sim_home2) / n):
         _r5 = tk.Tk()
         _r5.withdraw()
         try:
@@ -1381,11 +1390,13 @@ try:
             for _ in range(4):
                 _r5.update()
                 _time.sleep(0.05)
-            check("sim: editing the field enables simulation",
-                  _a5.clock.enabled is True)
+            check(
+                "sim: editing the field enables simulation", _a5.clock.enabled is True
+            )
             check("sim: checkbox follows", _a5.sim_on.get() is True)
-            check("sim: the edit took effect", _a5.clock.now().hour == 2,
-                  _a5.clock.now())
+            check(
+                "sim: the edit took effect", _a5.clock.now().hour == 2, _a5.clock.now()
+            )
 
             _a5._on_sim_reset()
             check("sim: reset disables", _a5.clock.enabled is False)
@@ -1395,8 +1406,9 @@ try:
                 _r5.update()
                 _time.sleep(0.05)
             check("sim: a second edit re-enables", _a5.clock.enabled is True)
-            check("sim: second edit applied", _a5.clock.now().hour == 5,
-                  _a5.clock.now())
+            check(
+                "sim: second edit applied", _a5.clock.now().hour == 5, _a5.clock.now()
+            )
             _a5.stop()
         finally:
             try:
@@ -1411,9 +1423,7 @@ finally:
 # ============ 24) عطل التشغيل يظهر في القراءة لا في السجل وحده ============
 _fault_home = tempfile.mkdtemp()
 try:
-    with mock.patch.object(
-        settings, "writable_path", lambda n: Path(_fault_home) / n
-    ):
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_fault_home) / n):
         _r6 = tk.Tk()
         _r6.withdraw()
         try:
@@ -1424,26 +1434,31 @@ try:
                 _r6.update()
                 _time.sleep(0.1)
             _cmd6 = PlaybackCommand(
-                file=None, target_db=0, volume_ratio=0.0,
-                fade_duration_sec=0.0, state=EngineState.DAILY_AMBIENT,
+                file=None,
+                target_db=0,
+                volume_ratio=0.0,
+                fade_duration_sec=0.0,
+                state=EngineState.DAILY_AMBIENT,
                 reason="t",
             )
-            _a6._update_readouts(
-                _a6.clock.now(), _cmd6, 30.0, False, False
+            _a6._update_readouts(_a6.clock.now(), _cmd6, 30.0, False, False)
+            check(
+                "readout clean before the fault",
+                "بلا صوت" not in _a6.state_text.get(),
+                _a6.state_text.get()[:50],
             )
-            check("readout clean before the fault",
-                  "بلا صوت" not in _a6.state_text.get(),
-                  _a6.state_text.get()[:50])
             _a6._player_error = "boom"
-            _a6._update_readouts(
-                _a6.clock.now(), _cmd6, 30.0, False, False
+            _a6._update_readouts(_a6.clock.now(), _cmd6, 30.0, False, False)
+            check(
+                "readout warns when nothing is playing",
+                "بلا صوت" in _a6.state_text.get(),
+                _a6.state_text.get()[:50],
             )
-            check("readout warns when nothing is playing",
-                  "بلا صوت" in _a6.state_text.get(),
-                  _a6.state_text.get()[:50])
-            check("readout keeps the engine state visible",
-                  "daily_ambient" in _a6.state_text.get(),
-                  _a6.state_text.get()[:70])
+            check(
+                "readout keeps the engine state visible",
+                "daily_ambient" in _a6.state_text.get(),
+                _a6.state_text.get()[:70],
+            )
             _a6._player_error = ""
             _a6.stop()
         finally:
@@ -1455,6 +1470,98 @@ finally:
     import shutil
 
     shutil.rmtree(_fault_home, ignore_errors=True)
+
+
+# ============ 25) presets عمق الخفض + تصفير حالة السيناريو ============
+_pres_home = tempfile.mkdtemp()
+try:
+    with mock.patch.object(
+        settings, "writable_path", lambda n: Path(_pres_home) / n
+    ):
+        _r7 = tk.Tk()
+        _r7.withdraw()
+        try:
+            from src.context_aware_audio.app import (
+                DUCK_PRESETS,
+                DUCK_PRESET_LABELS,
+                DesktopApp,
+            )
+
+            _a7 = DesktopApp(_r7, log_path=None)
+            check("presets: three depths are offered", len(DUCK_PRESETS) == 3,
+                  DUCK_PRESETS)
+            check("presets: none promises 90%",
+                  all(d < 90.0 for d in DUCK_PRESETS), DUCK_PRESETS)
+            check("presets: every depth is labelled",
+                  all(d in DUCK_PRESET_LABELS for d in DUCK_PRESETS),
+                  DUCK_PRESET_LABELS)
+            check("presets: the scale exists", hasattr(_a7, "duck_depth"))
+            check("presets: the scale feeds the engine config",
+                  _a7.config.duck_depth == _a7.duck_depth.get(),
+                  (_a7.config.duck_depth, _a7.duck_depth.get()))
+
+            _a7._on_duck_preset(80.0)
+            check("presets: choosing a depth updates the engine",
+                  abs(_a7.config.duck_depth - 80.0) < 1e-9, _a7.config.duck_depth)
+            check("presets: the derived max cut follows",
+                  abs((1 - _a7.engine.duck_max_ratio()) * 100 - 80.0) < 0.01,
+                  _a7.engine.duck_max_ratio())
+            check("presets: the depth is in the snapshot",
+                  _a7._settings_snapshot()["duck_depth"] == 80.0)
+            _a7._on_duck_preset(60.0)
+            check("presets: switching back works",
+                  abs(_a7.config.duck_depth - 60.0) < 1e-9, _a7.config.duck_depth)
+
+            # زر السيناريو يصفّر الحالة المثبّتة
+            _a7.manual_db.set(30.0)
+            _a7.start()
+            for _ in range(5):
+                _r7.update()
+                _time.sleep(0.1)
+            _a7._scenario("debate")
+            check("scenario: debate latches the mute",
+                  _a7.engine._in_debate_mute is True)
+            _a7._scenario("talk")
+            check("scenario: the next button clears the latch",
+                  _a7.engine._in_debate_mute is False,
+                  _a7.engine._in_debate_mute)
+            _a7._scenario("debate")
+            _a7._scenario("silence")
+            check("scenario: silence also clears the latch",
+                  _a7.engine._in_debate_mute is False)
+            _a7.stop()
+        finally:
+            try:
+                _r7.destroy()
+            except Exception:
+                pass
+finally:
+    import shutil
+
+    shutil.rmtree(_pres_home, ignore_errors=True)
+
+# مفتاح عمق الخفض يُنقّى كما بقيّة المفاتيح
+_co_home = tempfile.mkdtemp()
+try:
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_co_home) / n):
+        for raw, want in (
+            (50.0, 50.0),
+            (95.0, 95.0),
+            (1e9, 95.0),
+            (-5.0, 0.0),
+            (True, 70.0),
+            ("abc", 70.0),
+            (None, 70.0),
+        ):
+            (Path(_co_home) / "settings.json").write_text(
+                json.dumps({"duck_depth": raw}), encoding="utf-8"
+            )
+            got = settings.load_settings()["duck_depth"]
+            check(f"settings: duck_depth {raw!r} -> {want}", got == want, got)
+finally:
+    import shutil
+
+    shutil.rmtree(_co_home, ignore_errors=True)
 
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")

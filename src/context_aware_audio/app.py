@@ -44,6 +44,16 @@ SAVE_EVERY_TICKS = 25  # نبضة واحدة كل ~5 ثوانٍ
 METER_H = 22  # ارتفاع شريط قياس الـ dB
 CALIBRATE_SEC = 2.0  # مدة قياس ضجيج الغرفة
 ATHAN_VOLUME = 0.8  # مستوى نغمة تنبيه الأذان
+# عمق الخفض: نسبة أقصى خفض عند حدّ الكلام. ثلاثة مستويات
+# مبنية على ما يفعله المستخدم فعلاً، لا على أرقام مثالية.
+#   خفيف 60% - قراءة هادئة، جار يهمس
+#   عادي 70% - محادثة عادية (الافتراضي، سلوك المنحنى الأصلي)
+#   عميق 80% - متحدث واحد بصوت عالٍ أو تلفاز
+# لا يوجد عمق 90%: عند 65dB يصبح الكتم تاماً (نقاش حامي)،
+# فلا أحد ينطق 90% في هذا المشروع.
+DUCK_PRESETS = (60.0, 70.0, 80.0)
+DUCK_PRESET_LABELS = {60.0: "خفيف", 70.0: "عادي", 80.0: "عميق"}
+
 SIM_HINT = (
     "الأزمنة تعمل زمناً حقيقياً (لا تقفز أسبوع): 10ث هدوء، 60س نقاش، 5د سكون."
     + chr(10)
@@ -206,6 +216,12 @@ class DesktopApp:
         self.master_vol = tk.DoubleVar(
             value=float(self._settings.get("master_vol", 100.0))
         )
+        self.duck_depth = tk.DoubleVar(
+            value=float(self._settings.get("duck_depth", 70.0))
+        )
+        # الإعداد يمرّ مرة واحدة: نحوّله إلى إعدادات المحرك، ومنها
+        # engine.duck_max_ratio. مصدر واحد لا قيمتان متناقضتان.
+        self.config.duck_depth = float(self.duck_depth.get())
         self.master_mute = tk.BooleanVar(
             value=bool(self._settings.get("master_mute", False))
         )
@@ -274,6 +290,7 @@ class DesktopApp:
             "athan_enabled": bool(self.athan_enabled.get()),
             "sim_offset_sec": self.clock.offset_sec,
             "sim_enabled": bool(self.clock.enabled),
+            "duck_depth": float(self.duck_depth.get()),
         }
 
     def _save_settings(self) -> bool:
@@ -389,6 +406,26 @@ class DesktopApp:
         ttk.Checkbutton(out, text="كتم رئيسي", variable=self.master_mute).pack(
             anchor="w"
         )
+
+        ttk.Label(out, text="عمق الخفض أثناء الكلام:").pack(anchor="w")
+        ttk.Scale(
+            out, from_=0, to=95, variable=self.duck_depth, orient="horizontal"
+        ).pack(fill="x")
+        self.duck_depth.trace_add("write", self._on_duck_depth)
+        prow = ttk.Frame(out)
+        prow.pack(fill="x", pady=(2, 0))
+        for _d in DUCK_PRESETS:
+            ttk.Button(
+                prow,
+                text=DUCK_PRESET_LABELS.get(_d, f"{_d:.0f}%"),
+                command=lambda d=_d: self._on_duck_preset(d),
+            ).pack(side="left", padx=2)
+        ttk.Label(
+            prow,
+            text="90% لا تتحقق: عند 65dB يصبح الكتم تاماً",
+            foreground="#666",
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=8)
         ttk.Checkbutton(
             out, text="تنبيه لحظة الأذان", variable=self.athan_enabled
         ).pack(anchor="w")
@@ -417,6 +454,24 @@ class DesktopApp:
             self._log(f"mic device -> {dev_id}")
         except (IndexError, OSError) as e:
             self._log(f"mic device error: {e}")
+
+    # ---------- presets عمق الخفض ----------
+    def _on_duck_depth(self, *_args):
+        """عمق الخفض يُقرأ من إعداد المحرك، لا من حقل منفصل."""
+        try:
+            self.config.duck_depth = float(self.duck_depth.get())
+        except (TypeError, ValueError, tk.TclError):
+            self.duck_depth.set(self.config.duck_depth)
+
+    def _on_duck_preset(self, depth: float):
+        """يختار عمقاً جاهزاً ويشرح ما يعنيه: متحدث واحد أم حشد."""
+        self.duck_depth.set(depth)
+        self._on_duck_depth()
+        label = DUCK_PRESET_LABELS.get(depth, f"{depth:.0f}%")
+        self._log(f"عمق الخفض: {label}")
+        self._log(f"  أقصى خفض {depth:.0f}% عند حدّ الكلام، "
+                  f"و{100 - (1 - self.engine.duck_min_ratio()) * 100:.0f}% "
+                  f"عند 64dB")
 
     def _on_autostart(self):
         wanted = bool(self.autostart.get())
@@ -583,9 +638,17 @@ class DesktopApp:
 
         بدون التثبيت كانت النبضة التالية (200ms) تستبدله بإطار حقيقي من
         الميكروفون فيختفي الأثر فوراً. نحتفظ بالإطار المزروع حتى ينتهي.
+
+        تصفير الحالة هنا مقصود: زر «نقاش حامي» يثبّت كتم 60 ثانية، فلئن
+        تختار «كلام عادي» تظل مكتوماً ولا يعرف المستخدم أن الزر الأول
+        هو ما علقه. الزر يصفّر ثم يزرع، فيعكس الاختيار مباشرة.
         """
         if not self.running:
             self.start()
+        self.engine.reset()
+        self.vad.reset()
+        self._scenario_until = 0.0
+        self._scenario_db_value = 0.0
         now = self.clock.now()
         # الطابع زمن حقيقي: لو أخذ الطابع من الساعة المحاكاة لأصبح
         # الإطار المزروع في المستقبل بـ 12 ساعة عند الضبط على 02:00،

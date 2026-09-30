@@ -15,6 +15,7 @@ class EngineConfig:
     loud_debate_threshold_db: float = 65.0  # نقاش حامي
     speech_threshold_db: float = 40.0  # حد اعتبار الصوت كلاماً
     activity_threshold_db: float = 5.0  # أي صوت فوقه يُحسب نشاطاً (يمنع وضع النوم)
+    noise_floor_track_sec: float = 30.0  # نافذة تتبّع أرضية الضجيج
     noise_floor_margin_db: float = 12.0  # هامش عتبة الكلام فوق ضجيج الغرفة
 
     # ---- ثبات الكلام ----
@@ -26,6 +27,7 @@ class EngineConfig:
     speech_hysteresis_db: float = 4.0  # فرق الخروج عن الدخول
 
     # ---- نسب Ducking ----
+    duck_depth: float = 70.0  # أقصى خفض مئوية (القيم المحسوبة تحته)
     ducking_min_ratio: float = 0.10  # خفض 90% (يبقى 10%)
     ducking_max_ratio: float = 0.30  # خفض 70% (يبقى 30%)
     welcome_duck_ratio: float = 0.15  # ترحيب ضيوف -> 15%
@@ -38,6 +40,8 @@ class EngineConfig:
     greeting_cooldown_sec: float = 3.0  # تهدئة قبل إعادة التفعيل
 
     # ---- الأزمنة (بالثواني) ----
+    tick_interval_sec: float = 0.2  # نبضة قراءة الميكروفون (تحكم حجم نوافذ التتبّع)
+    duck_hold_sec: float = 3.0  # استمرار الخفض بعد الكلام قبل الصعود
     silence_for_fade_in_sec: float = 10.0  # هدوء مفاجئ -> Fade-In
     debate_cooldown_sec: float = 60.0  # عودة الصوت بعد النقاش الحامي
     sleep_no_activity_sec: float = 300.0  # 5 دقائق -> وضع النوم

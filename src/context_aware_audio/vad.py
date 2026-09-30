@@ -25,6 +25,10 @@ EPS = 1e-6
 # حصة webrtcvad التي تعني "لم يرصد صوتاً": يمنع التأكيد ولا يلغي المؤكَّد
 VETO_RATIO = 0.3
 
+# أقل عدد عينات صمت قبل الثقة بالوسيط: 5 ثوانٍ عند نبضة 200ms.
+# عينة واحدة قد تكون قفزة باب، فلا تصلح أساساً لعتبة.
+FLOOR_MIN_SAMPLES = 25
+
 
 def elapsed(ts: float, start: Optional[float], span: float) -> bool:
     """
@@ -56,7 +60,10 @@ class VadProcessor:
         self.config = config
         self._prev_db: float = 0.0
         self._has_prev: bool = False
-        self.noise_floor_db: Optional[float] = None
+        # أرضية الضجيج: ما بذره المستخدم، وما يقيسه التتبّع الحيّ
+        self._manual_floor_db: Optional[float] = None
+        self._live_floor_db: Optional[float] = None
+        self._floor_samples: list = []
         # فلتر الثبات
         self._above_since: Optional[float] = None
         self._below_since: Optional[float] = None
@@ -82,9 +89,55 @@ class VadProcessor:
                 self.webrtc_available = False
                 self._webrtc_vad = None
 
+    @property
+    def noise_floor_db(self) -> Optional[float]:
+        """أرضية الضجيج السارية: الحيّة إن توفّرت، وإلا ما بذره المعايرة."""
+        if self._live_floor_db is not None:
+            return self._live_floor_db
+        return self._manual_floor_db
+
+    @noise_floor_db.setter
+    def noise_floor_db(self, value: Optional[float]) -> None:
+        self._manual_floor_db = value
+
     def set_noise_floor(self, floor_db: float) -> None:
-        """يضبط أرضية ضجيج الغرفة ليرفع عتبة الكلام فوقها."""
-        self.noise_floor_db = max(0.0, min(80.0, floor_db))
+        """
+        يبذر أرضية الضجيج يدوياً (زر المعايرة).
+
+        لست القاعدة النهائية: التتبّع الحيّ يستبدلها خلال ثوانٍ. الغرض
+        ألّا تبدأ الجلسة بالعتبة الأساسية قبل أن تتجمع عينات كافية.
+        """
+        self._manual_floor_db: Optional[float] = max(0.0, min(80.0, floor_db))
+        self.noise_floor_db = self._manual_floor_db
+
+    def _track_floor(self, db_level: float, ts: float) -> None:
+        """
+        يجمع عينات الصمت فقط ويرفعها إلى وسيط متحرك.
+
+        الوسيط لا المتوسط: باب يُغلق مرة واحدة يجب ألّا يرفع الأرضية
+        36dB. والمتوسط يرتفع مع كل قفزة، والوسيط يتجاهلها.
+
+        لا نأخذ إلا إطارات غير الكلام. لو أخذنا الكلام لأرتفعت الأرضية
+        مع الكلام، فترتفع العتبة، فيتوقف الكلام عن认可ه، وتنحلّق
+        العتبة لأعلى - ارتداد لا خروج.
+        """
+        self._floor_samples.append(db_level)
+        limit = self._max_floor_samples()
+        if len(self._floor_samples) > limit:
+            del self._floor_samples[: len(self._floor_samples) - limit]
+
+    def _max_floor_samples(self) -> int:
+        """عدد عينات نافذة التتبّع عند نبضة واحدة."""
+        rate = 1.0 / max(0.01, self.config.tick_interval_sec)
+        return max(8, int(self.config.noise_floor_track_sec * rate))
+
+    def _update_floor(self) -> None:
+        """يعيد حساب الوسيط المتحرك إذا توفّرت عينات كافية."""
+        samples = self._floor_samples
+        if len(samples) < FLOOR_MIN_SAMPLES:
+            return
+        ordered = sorted(samples)
+        self._live_floor_db = ordered[len(ordered) // 2]
 
     def reset(self) -> None:
         """
@@ -105,13 +158,25 @@ class VadProcessor:
         self._speech_confirmed = False
         self._history.clear()
         self._last_confirmed_speech = float("-inf")
+        self._floor_samples.clear()
+        self._live_floor_db = None
 
     def speech_threshold(self) -> float:
-        """عتبة الكلام: لا تقل عن speech_threshold_db، وترتفع فوق ضجيج الغرفة."""
+        """
+        عتبة الكلام: لا تقل عن speech_threshold_db، وترتفع فوق ضجيج الغرفة.
+
+        الأرضية هي الوسيط المتحرك إن توفّر، وإلا ما بذرته المعايرة
+        اليدوية. في هذه الغرفة (أرضية 3.5dB) القاعدة max هي 40د》及 ترتفع
+        فعلاً فقط حين تتجاوز الأرضية 28dB - عندها تتكيّف مع تكييف
+        جديد أو غرفة أخرى دون أن يلمسها أحد.
+        """
         base = self.config.speech_threshold_db
-        if self.noise_floor_db is None:
+        floor = self._live_floor_db
+        if floor is None:
+            floor = self._manual_floor_db
+        if floor is None:
             return base
-        return max(base, self.noise_floor_db + self.config.noise_floor_margin_db)
+        return max(base, floor + self.config.noise_floor_margin_db)
 
     def _window_jump(self, ts: float, db_level: float) -> float:
         """
@@ -226,6 +291,10 @@ class VadProcessor:
         ts = timestamp if timestamp is not None else time.time()
 
         is_speech_raw, is_speech = self._update_speech(db_level, ts)
+        # التتبّع بعد قرار الإطار: نقيس الصمت الذي لا كلام فيه فقط
+        if not is_speech:
+            self._track_floor(db_level, ts)
+            self._update_floor()
         # الكتم أغلى قرار: يمرّ بالفلتر نفسه لا بمقارنة العتبة وحدها
         is_overlapping = is_speech and db_level >= cfg.loud_debate_threshold_db
         jump = self._window_jump(ts, db_level)
@@ -239,6 +308,9 @@ class VadProcessor:
             is_overlapping=is_overlapping,
             is_greeting_tone=is_greeting_tone,
             raw_energy=self.db_to_energy(db_level),
+            # العتبة السارية وقت هذا الإطار: يبدأ منحنى الخفض منها
+            # بدل قيمة ثابتة لا تعكس ما استُخدم في القرار.
+            threshold_db=self.speech_threshold(),
         )
         self._prev_db = db_level
         self._has_prev = True
