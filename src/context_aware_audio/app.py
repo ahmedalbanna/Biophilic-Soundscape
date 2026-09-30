@@ -45,6 +45,10 @@ from src.context_aware_audio.vad import VadProcessor
 
 # ثوابت الواجهة - لا أرقام مبثوثة في الكود
 TICK_MS = 200  # الفترة بين نبضات حلقة التحديث
+
+# خطوة عجلة الفأرة بالنصف، بوحدات التمرير. Tk يقرّبها إلى ~3 بكسل
+# على ويندوز، فبلا مضاعف تحتاج عشرات النقرات لصفحة واحدة.
+WHEEL_UNITS = 8
 SAVE_EVERY_TICKS = 25  # نبضة واحدة كل ~5 ثوانٍ
 METER_H = 22  # ارتفاع شريط قياس الـ dB
 CALIBRATE_SEC = 2.0  # مدة قياس ضجيج الغرفة
@@ -184,7 +188,11 @@ class DesktopApp:
     def __init__(self, root, log_path: Optional[Path] = None):
         self.root = root
         self.root.title("Context-Aware Audio Engine - Sanaa Desktop")
-        self.root.geometry("660x960")
+        # الارتفاع يُشتق من الشاشة لا مثبَّت: 960 كان يتجاوز الشاشات
+        # القصيرة، والتمرير يغطّي الباقي.
+        _h = max(560, min(960, int(self.root.winfo_screenheight() * 0.9)))
+        self.root.geometry(f"680x{_h}")
+        self.root.minsize(560, 480)
         self.log_path = log_path
 
         self.config = EngineConfig()
@@ -358,8 +366,63 @@ class DesktopApp:
         return save_settings(self._settings)
 
     def _build_ui(self):
-        f = ttk.Frame(self.root, padding=10)
-        f.pack(fill="both", expand=True)
+        """
+        يغلّف المحتوى بـCanvas مع شريط تمرير.
+
+        المحتوى يطلب نحو 1400 بكسل والنافذة 960، فكان آخرُ اللوحات
+        خارج الشاشة بلا وسيلة للوصول إليه. الالتفاف هنا لا يلمس أي
+        لوحة: كل ما تليه ينتج children للإطار `f` كما كان، فلا يتغيّر
+        سطر واحد في بقية الدالة.
+
+        Tk لا يمرّر عجلة الفأرة تلقائياً، فالعجلة مربوطة هنا صراحةً.
+        """
+        shell = ttk.Frame(self.root)
+        shell.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(
+            shell, highlightthickness=0, bd=0, background="#f0f0f0"
+        )
+        bar = ttk.Scrollbar(
+            shell, orient="vertical", command=canvas.yview
+        )
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        f = ttk.Frame(canvas, padding=10)
+        inner = canvas.create_window((0, 0), window=f, anchor="nw")
+
+        def _sync_width(event):
+            """يعرض الإطار الداخلي بعرض اللوحة مهما تغيّر الحجم."""
+            canvas.itemconfigure(inner, width=event.width)
+
+        canvas.bind("<Configure>", _sync_width)
+
+        def _sync_height(event):
+            """يحدّث مدى التمرير بارتفاع المحتوى الفعلي."""
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        f.bind("<Configure>", _sync_height)
+
+        def _wheel(event):
+            # Tk يتجاهل `units` تقريباً على ويندوز: تمريرة وحدة
+            # واحدة تعادل نحو 3 بكسل، فثمانون نقرة تعبر ثلث الصفحة
+            # فقط. الضرب في ثمانية يجعل النقرة خطوة مقروءة.
+            step = int(-event.delta / 120) * WHEEL_UNITS
+            if step:
+                canvas.yview_scroll(step, "units")
+
+        # يُربط على الإطار الداخلي لا على اللوحة: كل الأدوات
+        # تنسخ إليها، فيصلها الحدث بلا ربط لكل واحدة.
+        # bind_all يحتاج حصراً عند الإغلاق - وإلا تراكم مستمعون
+        # كلهم يمرّرون اللوحة.
+        f.bind_all("<MouseWheel>", _wheel)
+        self._canvas = canvas
+        self._scrollbar = bar
+        # محفوظان لأن الفحص يحتاجهما: العربة محلية، وربط عام بلا
+        # مرجع إليه لا يمكن فكّه إلا من هنا.
+        self._wheel = _wheel
+        self._wheel_binding = ("<MouseWheel>", _wheel)
 
         ttk.Label(
             f, text="محرك الصوت التكيفي - صنعاء", font=("Segoe UI", 14, "bold")
@@ -1036,6 +1099,13 @@ class DesktopApp:
         self.mic.stop()
         self.player.stop()
         self.status_text.set("متوقف")
+        # حصر ربط عجلة الفأرة: bind_all في bind() العام، وإلا بقي
+        # مستمع بعد الإغلاق فيعيد كل مرة تركيب الواجهة.
+        if getattr(self, "_wheel_binding", None):
+            try:
+                self.root.unbind_all(self._wheel_binding[0])
+            except (tk.TclError, KeyError):
+                pass
 
     def _load_prayer_async(self):
         def work():
