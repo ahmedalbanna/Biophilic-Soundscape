@@ -33,6 +33,7 @@ python tests/test_content_pcm.py        #  34 - توصيل PCM بالميكرو�
 python tests/test_content_panel.py      #  51 - لوحة المحتوى في الواجهة
 python tests/test_simulate.py           #  25 - سيناريوهات المحاكاة 7 و8
 python tests/test_prose.py              #   7 - لا حروف صينية ولا إنجليزية في النثر
+python tests/test_content_offset.py     #   4 - تكامل: إزاحة المحاكاة مع التطبيق الحقيقي
 python tests/test_desktop.py            # 245 - الأصول/المشغل/VAD/الصلاة/الإعدادات/الواجهة
 python -m src.context_aware_audio.simulate
 ```

@@ -33,12 +33,29 @@ python tests/test_content_pcm.py                #  34 - read_pcm + the tick gate
 python tests/test_content_panel.py              #  51 - the Tk panel (real time)
 python tests/test_simulate.py                   #  25 - scenarios 7 and 8
 python tests/test_prose.py                      #   7 - no CJK, no English prose
+python tests/test_content_offset.py             #   4 - integration: sim offset, real
 python tests/test_desktop.py                    # 245 checks - assets/player/VAD/prayer/UI
 ```
 
-Before declaring work done: `py_compile` all modules, `pyflakes`, all twelve
+`test_content_offset.py` takes about a minute of real time. It is the only
+file that plays through `app._tick` with a live `SimClock`, and it is the
+one that catches a real clock/unit mix-up: with a +3.4h offset it plays
+three consecutive clips, and with the `ts` argument dropped from
+`ContentEngine._start` it plays one. It cannot be injected — the whole
+point is the untampered path.
+
+Before declaring work done: `py_compile` all modules, `pyflakes`, all thirteen
 test files, and a UI smoke test. `simulate.py` is the fastest way to see a
 decision change take effect.
+
+**Never pass `now` where `ts` belongs.** `app.py` keeps the simulated clock
+(`now`, decides the period and the prayer window) apart from the wall clock
+(`frame.timestamp`, drives every timer and every position). Content mixes
+both: `ContentEngine.update(frame, ts, now, ...)` takes one of each, and
+`_room_quiet_since` is compared with `ts` everywhere. Seeding it from
+`now.timestamp()` puts the whole simulation offset inside `quiet_for`, and
+since the field is only re-seeded when it is `None`, a wrong seed lives for
+the rest of the day.
 
 ## Module layout
 
