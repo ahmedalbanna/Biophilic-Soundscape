@@ -36,7 +36,8 @@ class AudioFrame:
 
     timestamp: float = field(default_factory=time.time)
     db_level: float = 0.0  # شدة الصوت dB
-    is_speech: bool = False  # نتيجة VAD
+    is_speech: bool = False  # نتيجة VAD بعد فلتر الثبات
+    is_speech_raw: bool = False  # تجاوز العتبة في هذا الإطار وحده
     is_overlapping: bool = False  # هل هناك تداخل أصوات (صخب)؟
     is_greeting_tone: bool = False  # نبرة ترحيب مرتفعة
     raw_energy: float = 0.0  # طاقة خام (اختياري)

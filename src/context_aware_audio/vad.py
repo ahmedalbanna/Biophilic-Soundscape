@@ -1,25 +1,49 @@
 """
 vad.py - كشف النشاط الصوتي ومعالجة الإشارة
-- وضع محاكاة: يستقبل AudioFrame جاهزة
-- وضع حقيقي: يحلل مصفوفة PCM عبر طاقة الإشارة + webrtcvad (اختياري)
-- معايرة: set_noise_floor() يرفع عتبة الكلام فوق ضجيج الغرفة
+
+- analyze_frame: المسار الحيّ. يقارن dB بعتبة ديناميكية ثم يمرّ
+  بفلتر ثبات وتخلّف. الواجهة تستدعيه بإطار كل 200ms.
+- analyze_pcm: مسار مستقبلي لـ webrtcvad عند توفره. غير موصول
+  بالميكروفون بعد، فوجوده في الشيفرة لا يعني أنه يعمل.
+- معايرة: set_noise_floor() يرفع عتبة الكلام فوق ضجيج الغرفة.
 """
 
 import importlib.util
 import math
 import time
-from typing import Optional
+from collections import deque
+from typing import Deque, Optional, Tuple
 
 from .audio_types import AudioFrame
 from .config import EngineConfig
+
+# فرق طوابع الزمن العائمة: (3000.2 - 3000.0) = 0.1999999999998181
+# فالمقارنة الحرفية بـ 0.2 تفشل عند أرقام مستديرة. التسامح أصغر
+# بكثير من أي فاصل إطارات حقيقي، فيصلح الحساب ولا يوسّع النافذة فعلياً.
+EPS = 1e-6
+
+
+def elapsed(ts: float, start: Optional[float], span: float) -> bool:
+    """
+    هل مضى من `start` ما يفي بـ `span`؟
+
+    존재ت هذه المقارنة موزّعة في أربعة مواضع، وأخطأ واحد منها
+    (استمرار نبرة الترحيب) كان يفشل عند حدّ النافذة بالضبط بسبب
+    فرق الأعداد العشرية: 100.8 - 100.5 = 0.2999999999999545.
+    توحيدها هنا يمنع تكرار الخطأ عند كل مقارنة جديدة.
+    """
+    if start is None:
+        return False
+    return ts - start >= span - EPS
 
 
 class VadProcessor:
     """
     معالج VAD خفيف:
-    - is_speech من تجاوز عتبة الكلام (ديناميكية بعد المعايرة)
-    - is_overlapping عند تجاوز عتبة النقاش الحامي
-    - نبرة الترحيب: قفزة بداية + استمرار، مع تهدئة
+    - القرار يمرّ بفلتر ثبات: إطار واحد لا يكفي
+    - is_speech_raw يكشف تجاوز العتبة لحظياً، وis_speech يقرّر بعد الثبات
+    - is_overlapping يمرّ بالفلتر نفسه: كتم النقاش أغلى قرار بالنظام
+    - نبرة الترحيب: ارتفاع خلال نافذة محددة + بقاء فوق العتبة
     - analyze_pcm يستخدم webrtcvad عند توفره، وإلا الطاقة فقط
     """
 
@@ -28,10 +52,18 @@ class VadProcessor:
         self._prev_db: float = 0.0
         self._has_prev: bool = False
         self.noise_floor_db: Optional[float] = None
+        # فلتر الثبات
+        self._above_since: Optional[float] = None
+        self._below_since: Optional[float] = None
+        self._speech_confirmed: bool = False
         # نافذة الترحيب: نحتفظ بأقصى قفزة خلال فترة الاستمرار
         self._elevated_since: Optional[float] = None
         self._peak_jump_db: float = 0.0
         self._last_greeting_time: float = 0.0
+        # تاريخ المستويات لقياس القفزة على نافذة حقيقية لا إطار واحد
+        self._history: Deque[Tuple[float, float]] = deque(maxlen=64)
+        # -inf حتى لا تحجب أول عملية تأكيد cooldown عند أي طابع زمني
+        self._last_confirmed_speech: float = float("-inf")
         self.webrtc_available: bool = importlib.util.find_spec("webrtcvad") is not None
         self._webrtc_vad = None
         if self.webrtc_available:
@@ -60,6 +92,12 @@ class VadProcessor:
         self._elevated_since = None
         self._peak_jump_db = 0.0
         self._last_greeting_time = 0.0
+        # لا يُنسى أي حقل: المتبقي يتسرب بين السيناريوهات والاختبارات
+        self._above_since = None
+        self._below_since = None
+        self._speech_confirmed = False
+        self._history.clear()
+        self._last_confirmed_speech = float("-inf")
 
     def speech_threshold(self) -> float:
         """عتبة الكلام: لا تقل عن speech_threshold_db، وترتفع فوق ضجيج الغرفة."""
@@ -67,6 +105,68 @@ class VadProcessor:
         if self.noise_floor_db is None:
             return base
         return max(base, self.noise_floor_db + self.config.noise_floor_margin_db)
+
+    def _window_jump(self, ts: float, db_level: float) -> float:
+        """
+        أقصى ارتفاع خلال نافذة بداية النبرة، لا منذ الإطار السابق.
+
+        القياس من الإطار الأخير يجعل أي ارتفاع 200ms qualify كبداية،
+        فيستحق greeting_onset_window_sec صامتاً. نقيس من أقدم عينة
+        ما زالت داخل النافذة.
+        """
+        window = self.config.greeting_onset_window_sec
+        baseline: Optional[float] = None
+        # من الأحدث للأقدم: القطع عند أول عينة خارج النافذة.
+        for sample_ts, sample_db in reversed(self._history):
+            if ts - sample_ts > window:
+                break
+            baseline = sample_db if baseline is None else min(baseline, sample_db)
+        if baseline is None:
+            return 0.0
+        return db_level - baseline
+
+    def _update_speech(self, db_level: float, ts: float) -> Tuple[bool, bool]:
+        """
+        يحدّث فلتر الثبات ويعيد (is_speech_raw, is_speech).
+
+        الدخول عند speech_threshold، والخروج عند threshold - hysteresis،
+        فلا يطنّش قرارٌ على حدّ العتبة. والتأكيد يحتاج بقاءً
+        speech_onset_sec، والإبطال يحتاج هبوطاً speech_release_sec.
+        """
+        cfg = self.config
+        enter = self.speech_threshold()
+        leave = enter - cfg.speech_hysteresis_db
+        raw = db_level >= enter
+
+        if not self._speech_confirmed:
+            if raw:
+                if self._above_since is None:
+                    self._above_since = ts
+                held = elapsed(ts, self._above_since, cfg.speech_onset_sec)
+                cooled = elapsed(
+                    ts,
+                    self._last_confirmed_speech,
+                    cfg.speech_retrigger_cooldown_sec,
+                )
+                if held and cooled:
+                    self._speech_confirmed = True
+                    self._last_confirmed_speech = ts
+                    self._below_since = None
+            else:
+                self._above_since = None
+        else:
+            if db_level < leave:
+                if self._below_since is None:
+                    self._below_since = ts
+                if elapsed(ts, self._below_since, cfg.speech_release_sec):
+                    self._speech_confirmed = False
+                    self._above_since = None
+                    self._below_since = None
+            else:
+                # داخل نطاق التخلفي: نبقى متكلّفين ولا نعيد حساب الإبطال
+                self._below_since = None
+
+        return raw, self._speech_confirmed
 
     def _detect_greeting(
         self, db_level: float, jump: float, is_speech: bool, ts: float
@@ -92,8 +192,8 @@ class VadProcessor:
         else:
             self._peak_jump_db = max(self._peak_jump_db, jump)
 
-        sustained = ts - self._elevated_since >= cfg.greeting_sustain_sec
-        cooled = ts - self._last_greeting_time >= cfg.greeting_cooldown_sec
+        sustained = elapsed(ts, self._elevated_since, cfg.greeting_sustain_sec)
+        cooled = elapsed(ts, self._last_greeting_time, cfg.greeting_cooldown_sec)
         if not (sustained and cooled):
             return False
         if self._peak_jump_db < cfg.greeting_min_jump_db:
@@ -110,21 +210,25 @@ class VadProcessor:
         """يحلل مستوى dB خام ويعيد AudioFrame مصنفاً."""
         cfg = self.config
         ts = timestamp if timestamp is not None else time.time()
-        is_speech = db_level >= self.speech_threshold()
+
+        is_speech_raw, is_speech = self._update_speech(db_level, ts)
+        # الكتم أغلى قرار: يمرّ بالفلتر نفسه لا بمقارنة العتبة وحدها
         is_overlapping = is_speech and db_level >= cfg.loud_debate_threshold_db
-        jump = db_level - self._prev_db
+        jump = self._window_jump(ts, db_level)
         is_greeting_tone = self._detect_greeting(db_level, jump, is_speech, ts)
 
         frame = AudioFrame(
             timestamp=ts,
             db_level=db_level,
             is_speech=is_speech,
+            is_speech_raw=is_speech_raw,
             is_overlapping=is_overlapping,
             is_greeting_tone=is_greeting_tone,
             raw_energy=self.db_to_energy(db_level),
         )
         self._prev_db = db_level
         self._has_prev = True
+        self._history.append((ts, db_level))
         return frame
 
     def analyze_pcm(self, pcm_bytes: bytes, sample_rate: int = 16000) -> AudioFrame:
@@ -165,9 +269,8 @@ class VadProcessor:
             return 0.0
         import numpy as np
 
-        samples = np.frombuffer(
-            pcm_bytes[: len(pcm_bytes) - (len(pcm_bytes) % 2)], dtype="<i2"
-        )
+        usable = len(pcm_bytes) - (len(pcm_bytes) % 2)
+        samples = np.frombuffer(pcm_bytes[:usable], dtype="<i2")
         if samples.size == 0:
             return 0.0
         rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float64)))))

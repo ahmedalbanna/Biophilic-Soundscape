@@ -17,6 +17,14 @@ class EngineConfig:
     activity_threshold_db: float = 5.0  # أي صوت فوقه يُحسب نشاطاً (يمنع وضع النوم)
     noise_floor_margin_db: float = 12.0  # هامش عتبة الكلام فوق ضجيج الغرفة
 
+    # ---- ثبات الكلام ----
+    # استمرارية: الواجهة تقرأ كل 200ms، فالنوافذ تُقاس بعدد إطارات.
+    # 0.2ث = إطاران، 0.4ث = إطاران. الثبات أطول من البدء حتى لا يطنّش.
+    speech_onset_sec: float = 0.2  # تأكيد الكلام بعد هذا الزمن
+    speech_release_sec: float = 0.4  # إنهاءه بعد الهبوط هذا الزمن
+    speech_retrigger_cooldown_sec: float = 3.0  # تهدئة قبل تأكيد جديد
+    speech_hysteresis_db: float = 4.0  # فرق الخروج عن الدخول
+
     # ---- نسب Ducking ----
     ducking_min_ratio: float = 0.10  # خفض 90% (يبقى 10%)
     ducking_max_ratio: float = 0.30  # خفض 70% (يبقى 30%)

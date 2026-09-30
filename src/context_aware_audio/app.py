@@ -439,7 +439,10 @@ class DesktopApp:
         box.pack(fill="x", pady=6)
 
         ttk.Checkbutton(
-            box, text="تدبيل الوقت (تجربة)", variable=self.sim_on, command=self._on_sim_toggle
+            box,
+            text="تدبيل الوقت (تجربة)",
+            variable=self.sim_on,
+            command=self._on_sim_toggle,
         ).pack(anchor="w")
 
         ttk.Label(box, textvariable=self.sim_readout, font=("Consolas", 9)).pack(
@@ -675,7 +678,7 @@ class DesktopApp:
                         self._player_error_logged = True
                 else:
                     self._player_error_logged = False
-                self._update_readouts(now, cmd, db, auto.is_speech)
+                self._update_readouts(now, cmd, db, auto.is_speech, auto.is_speech_raw)
             else:
                 self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
             self._update_sim_readout(now, real_now)
@@ -790,15 +793,20 @@ class DesktopApp:
             self.player.set_eq(eq)
             self._last_eq = eq
 
-    def _update_readouts(self, now, cmd, db: float, is_speech: bool):
+    def _update_readouts(
+        self, now, cmd, db: float, is_speech: bool, is_speech_raw: bool = False
+    ):
         """يحدّث لوحات القراءة: الفترة، الحالة، العدّاد، الصلاة التالية، الشريط."""
         period = self.engine.calendar.period_for_datetime(now)
         label = PERIOD_LABELS_AR.get(period, period.value)
         self.period_text.set(f"الفترة: {label} ({period.value})")
         self.state_text.set(f"الحالة: {cmd.state.value} - {cmd.reason}")
-        self.db_label.config(
-            text=f"dB: {db:.0f} كلام={int(is_speech) * 1} ({self.player.backend})"
-        )
+        # عند اختلاف المؤشرين نعرض الخام أيضاً: هو ما يفسّر تأخّر 200ms
+        # الذي يفرضه فلتر الثبات، وإلا بدا الكتم غير مبرَّر.
+        speech_txt = f"كلام={int(is_speech) * 1}"
+        if bool(is_speech_raw) != bool(is_speech):
+            speech_txt += f" خام={int(is_speech_raw) * 1}"
+        self.db_label.config(text=f"dB: {db:.0f} {speech_txt} ({self.player.backend})")
         nxt = self.engine.prayer.next_prayer(now)
         if nxt is not None:
             mins = max(0, int((nxt.adhan - now).total_seconds() // 60))

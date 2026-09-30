@@ -145,10 +145,17 @@ v = VadProcessor(EngineConfig())
 check("vad default thr", v.speech_threshold() == 40.0)
 v.set_noise_floor(30)
 check("vad floor thr", v.speech_threshold() == 42.0)
-check("vad floor blocks 35dB", not v.analyze_frame(35).is_speech)
-check("vad floor passes 45dB", v.analyze_frame(45).is_speech)
+check("vad floor blocks 35dB", not v.analyze_frame(35).is_speech_raw)
+_f45 = v.analyze_frame(45, timestamp=300.0)
+check("vad floor passes 45dB (raw)", _f45.is_speech_raw, str(_f45))
+_f45b = v.analyze_frame(45, timestamp=300.2)
+check("vad floor passes 45dB (confirmed)", _f45b.is_speech, str(_f45b))
 silence = struct.pack("<1600h", *([0] * 1600))
-check("vad pcm silence", not v.analyze_pcm(silence).is_speech)
+check("vad pcm silence", not v.analyze_pcm(silence).is_speech_raw)
+check(
+    "vad pcm silence on a clean processor",
+    not VadProcessor(EngineConfig()).analyze_pcm(silence).is_speech,
+)
 
 
 # ============ 4) نبرة الترحيب: قفزة + استمرار ============
@@ -672,7 +679,10 @@ finally:
 # ============ 14) VAD.reset() يمسح نافذة الترحيب ============
 _v = VadProcessor(EngineConfig())
 _v.analyze_frame(30.0, timestamp=100.0)
-_v.analyze_frame(75.0, timestamp=100.1)  # يرفع النافذة دون إكمال الشرط
+# نحتاج تأكيد الكلام أولاً (0.2ث) قبل أن تُفتح نافذة الترحيب
+_v.analyze_frame(75.0, timestamp=100.1)
+_v.analyze_frame(75.0, timestamp=100.2)
+_v.analyze_frame(75.0, timestamp=100.3)  # يرفع النافذة دون إكمال الشرط
 check("vad: greeting pending before reset", _v._elevated_since is not None)
 _v.reset()
 check("vad: reset clears elevation window", _v._elevated_since is None)
@@ -957,8 +967,11 @@ check(
 )
 _before = _c1.offset_sec
 _c1.nudge(-1)
-check("sim: nudge(-1) shifts -3600s", abs((_c1.offset_sec - _before) + 3600) < 2,
-      _c1.offset_sec - _before)
+check(
+    "sim: nudge(-1) shifts -3600s",
+    abs((_c1.offset_sec - _before) + 3600) < 2,
+    _c1.offset_sec - _before,
+)
 _c1.nudge(1)
 _c1.reset()
 check("sim: reset clears enabled", _c1.enabled is False)
@@ -975,26 +988,36 @@ try:
         (Path(_ts3) / "settings.json").write_text(
             json.dumps({"sim_offset_sec": -7200.5}), encoding="utf-8"
         )
-        check("sim: offset loaded from settings",
-              settings.load_settings()["sim_offset_sec"] == -7200.5)
-        (Path(_ts3) / "settings.json").write_text(
-            json.dumps({"sim_offset_sec": 10 ** 9}), encoding="utf-8"
+        check(
+            "sim: offset loaded from settings",
+            settings.load_settings()["sim_offset_sec"] == -7200.5,
         )
-        check("sim: offset clamped on load",
-              settings.load_settings()["sim_offset_sec"] == MAX_OFFSET_SEC)
+        (Path(_ts3) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": 10**9}), encoding="utf-8"
+        )
+        check(
+            "sim: offset clamped on load",
+            settings.load_settings()["sim_offset_sec"] == MAX_OFFSET_SEC,
+        )
         (Path(_ts3) / "settings.json").write_text(
             json.dumps({"sim_offset_sec": True}), encoding="utf-8"
         )
-        check("sim: bool offset rejected",
-              settings.load_settings()["sim_offset_sec"] == 0.0)
+        check(
+            "sim: bool offset rejected",
+            settings.load_settings()["sim_offset_sec"] == 0.0,
+        )
         (Path(_ts3) / "settings.json").write_text(
             json.dumps({"sim_offset_sec": "abc"}), encoding="utf-8"
         )
-        check("sim: junk offset rejected",
-              settings.load_settings()["sim_offset_sec"] == 0.0)
-        check("sim: offset round-trips",
-              settings.save_settings({"sim_offset_sec": 3600.0})
-              and settings.load_settings()["sim_offset_sec"] == 3600.0)
+        check(
+            "sim: junk offset rejected",
+            settings.load_settings()["sim_offset_sec"] == 0.0,
+        )
+        check(
+            "sim: offset round-trips",
+            settings.save_settings({"sim_offset_sec": 3600.0})
+            and settings.load_settings()["sim_offset_sec"] == 3600.0,
+        )
 finally:
     import shutil
 
@@ -1004,10 +1027,16 @@ finally:
 from datetime import time as dtime
 from src.context_aware_audio import ContextAwareAudioEngine
 from src.context_aware_audio.audio_types import AudioFrame
+
 _eng = ContextAwareAudioEngine(EngineConfig())
 _eng.prayer.set_times(
-    {"fajr": dtime(5, 10), "dhuhr": dtime(12, 5), "asr": dtime(15, 25),
-     "maghrib": dtime(18, 10), "isha": dtime(19, 30)}
+    {
+        "fajr": dtime(5, 10),
+        "dhuhr": dtime(12, 5),
+        "asr": dtime(15, 25),
+        "maghrib": dtime(18, 10),
+        "isha": dtime(19, 30),
+    }
 )
 _day = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
 _real_t0 = 1_000_000.0
@@ -1032,6 +1061,7 @@ check(
 # --- انحدار: القفزة لا تمسّ حالة المحرك أو مؤقّت الخمول ---
 import tkinter as tk
 import time as _time
+
 _root2 = tk.Tk()
 _root2.withdraw()
 try:
@@ -1053,40 +1083,60 @@ try:
         _root2.update()
         _time.sleep(0.1)
 
-    check("sim: activity timer untouched by the jump",
-          _app2.engine._last_activity_time == _act_before,
-          f"{_act_before} -> {_app2.engine._last_activity_time}")
-    check("sim: speech timer untouched by the jump",
-          _app2.engine._last_speech_time == _stamp_before)
+    check(
+        "sim: activity timer untouched by the jump",
+        _app2.engine._last_activity_time == _act_before,
+        f"{_act_before} -> {_app2.engine._last_activity_time}",
+    )
+    check(
+        "sim: speech timer untouched by the jump",
+        _app2.engine._last_speech_time == _stamp_before,
+    )
 
     # سيناريو تحت ساعة محاكاة لا يضع طابعاً في المستقبل
     _app2._scenario("talk")
     _now_real = _app2.clock.real_now().timestamp()
     _drift = abs(_app2.engine._last_activity_time - _now_real)
-    check("sim: scenario stamps stay on the real timeline",
-          _drift < 30, f"drift={_drift:.1f}s")
+    check(
+        "sim: scenario stamps stay on the real timeline",
+        _drift < 30,
+        f"drift={_drift:.1f}s",
+    )
 
     # الانتقال بين الفترات
-    for hour, expect in ((2, "\u0627\u0644\u0644\u064a\u0644"), (15, "\u0627\u0644\u0645\u0642\u064a\u0644")):
+    for hour, expect in (
+        (2, "\u0627\u0644\u0644\u064a\u0644"),
+        (15, "\u0627\u0644\u0645\u0642\u064a\u0644"),
+    ):
         _app2.clock.set_hhmmss(hour, 0)
         for _ in range(6):
             _root2.update()
             _time.sleep(0.1)
-        check(f"sim: {hour:02d}:00 shows {expect}",
-              expect in _app2.period_text.get(), _app2.period_text.get())
+        check(
+            f"sim: {hour:02d}:00 shows {expect}",
+            expect in _app2.period_text.get(),
+            _app2.period_text.get(),
+        )
 
     # دقيقة الأذان الحقيقية بعد التحويل
     _app2.clock.set_hhmmss(18, 10)
     for _ in range(8):
         _root2.update()
         _time.sleep(0.1)
-    check("sim: 18:10 mutes for maghrib",
-          "prayer_muted" in _app2.state_text.get(), _app2.state_text.get())
+    check(
+        "sim: 18:10 mutes for maghrib",
+        "prayer_muted" in _app2.state_text.get(),
+        _app2.state_text.get(),
+    )
 
     # عناصر اللوحة موجودة
-    check("sim: panel widgets exist",
-          all(hasattr(_app2, n) for n in
-              ("sim_on", "sim_readout", "sim_hour", "sim_minute")))
+    check(
+        "sim: panel widgets exist",
+        all(
+            hasattr(_app2, n)
+            for n in ("sim_on", "sim_readout", "sim_hour", "sim_minute")
+        ),
+    )
     _app2._on_sim_reset()
     check("sim: reset disables the box", _app2.clock.enabled is False)
     check("sim: reset clears the offset", _app2.clock.offset_sec == 0.0)
@@ -1099,18 +1149,25 @@ try:
     for _ in range(3):
         _root2.update()
         _time.sleep(0.05)
-    check("sim: hour field drives the clock", _app2.clock.now().hour == 3,
-          _app2.clock.now())
-    check("sim: readout shows both clocks",
-          "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
-          and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
-          _app2.sim_readout.get())
+    check(
+        "sim: hour field drives the clock",
+        _app2.clock.now().hour == 3,
+        _app2.clock.now(),
+    )
+    check(
+        "sim: readout shows both clocks",
+        "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
+        and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
+        _app2.sim_readout.get(),
+    )
 
     # الخيار يُحفظ ويعود
     _app2._save_settings()
-    check("sim: offset persisted in settings snapshot",
-          "sim_offset_sec" in _app2._settings_snapshot(),
-          _app2._settings_snapshot().keys())
+    check(
+        "sim: offset persisted in settings snapshot",
+        "sim_offset_sec" in _app2._settings_snapshot(),
+        _app2._settings_snapshot().keys(),
+    )
     _app2.stop()
 finally:
     try:
@@ -1128,7 +1185,9 @@ _cx.set_enabled(True)
 check("sim: set_enabled is public and works", _cx.enabled is True)
 _cx.set_enabled(False)
 check("sim: set_enabled(False) disables", _cx.enabled is False)
-check("sim: clamp uses finite check", SimClock(offset_sec=float("nan")).offset_sec == 0.0)
+check(
+    "sim: clamp uses finite check", SimClock(offset_sec=float("nan")).offset_sec == 0.0
+)
 check("sim: clamp rejects inf", SimClock(offset_sec=float("inf")).offset_sec == 0.0)
 
 # حالة التفعيل تُحفظ: إزاحة بلا علم بها لا تقفز عند أول ضغطة
@@ -1136,21 +1195,28 @@ _t20 = tempfile.mkdtemp()
 try:
     with mock.patch.object(settings, "writable_path", lambda n: Path(_t20) / n):
         (Path(_t20) / "settings.json").write_text(
-            json.dumps({"sim_offset_sec": -7200.0, "sim_enabled": True}), encoding="utf-8"
+            json.dumps({"sim_offset_sec": -7200.0, "sim_enabled": True}),
+            encoding="utf-8",
         )
         _s20 = settings.load_settings()
         check("sim: enabled flag persisted", _s20["sim_enabled"] is True, _s20)
-        check("sim: offset persisted alongside", _s20["sim_offset_sec"] == -7200.0, _s20)
+        check(
+            "sim: offset persisted alongside", _s20["sim_offset_sec"] == -7200.0, _s20
+        )
         (Path(_t20) / "settings.json").write_text(
             json.dumps({"sim_enabled": "false"}), encoding="utf-8"
         )
-        check("sim: string 'false' means off",
-              settings.load_settings()["sim_enabled"] is False)
+        check(
+            "sim: string 'false' means off",
+            settings.load_settings()["sim_enabled"] is False,
+        )
         (Path(_t20) / "settings.json").write_text(
             json.dumps({"sim_enabled": "true"}), encoding="utf-8"
         )
-        check("sim: string 'true' means on",
-              settings.load_settings()["sim_enabled"] is True)
+        check(
+            "sim: string 'true' means on",
+            settings.load_settings()["sim_enabled"] is True,
+        )
 finally:
     import shutil
 
@@ -1174,10 +1240,12 @@ try:
             _root3.update()
             _time.sleep(0.1)
     _after3 = _app3.period_text.get()
-    check("player fault does not freeze the readouts", _after3 != "-" and bool(_after3),
-          _after3)
-    check("player fault logged once, not per tick",
-          _app3._player_error_logged is True)
+    check(
+        "player fault does not freeze the readouts",
+        _after3 != "-" and bool(_after3),
+        _after3,
+    )
+    check("player fault logged once, not per tick", _app3._player_error_logged is True)
     _app3.stop()
 finally:
     try:
@@ -1187,8 +1255,12 @@ finally:
 
 # الملف الناقص لا يغرق السجل على واجهة winsound أيضاً
 _missing_cmd = PlaybackCommand(
-    file="no_such_asset_probe.wav", target_db=38, volume_ratio=1.0,
-    fade_duration_sec=0.1, state=EngineState.DAILY_AMBIENT, reason="t",
+    file="no_such_asset_probe.wav",
+    target_db=38,
+    volume_ratio=1.0,
+    fade_duration_sec=0.1,
+    state=EngineState.DAILY_AMBIENT,
+    reason="t",
 )
 _pl6 = RealPlayer()
 _pl6._pg = None
@@ -1206,12 +1278,60 @@ _pl6.stop()
 # السجل محدود الطول
 _pl7 = RealPlayer()
 for _ in range(HISTORY_LIMIT + 250):
-    _pl7.apply(PlaybackCommand(
-        file="water_stream.wav", target_db=38, volume_ratio=1.0,
-        fade_duration_sec=0.0, state=EngineState.DAILY_AMBIENT, reason="t"))
-check("player: history is bounded", len(_pl7.history) <= HISTORY_LIMIT,
-      len(_pl7.history))
+    _pl7.apply(
+        PlaybackCommand(
+            file="water_stream.wav",
+            target_db=38,
+            volume_ratio=1.0,
+            fade_duration_sec=0.0,
+            state=EngineState.DAILY_AMBIENT,
+            reason="t",
+        )
+    )
+check(
+    "player: history is bounded", len(_pl7.history) <= HISTORY_LIMIT, len(_pl7.history)
+)
 _pl7.stop()
+
+
+# ============ 21) قراءة خام/مؤكد في الواجهة ============
+# أثناء فلتر الثبات يختلف المؤشران، وهذا ما يفسر تأخر 200ms.
+# إن أخفيناه بدا الكتم غير مبرَّر عند ضبط أي عتبة.
+_r4 = tk.Tk()
+_r4.withdraw()
+try:
+    from src.context_aware_audio.app import DesktopApp
+
+    _a4 = DesktopApp(_r4, log_path=None)
+    _cmd4 = PlaybackCommand(
+        file=None, target_db=0, volume_ratio=0.0, fade_duration_sec=0.0,
+        state=EngineState.DUCKED, reason="t",
+    )
+    _now4 = _a4.clock.now()
+    for _raw, _conf, _want in (
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ):
+        _a4._update_readouts(_now4, _cmd4, 50.0, _conf, _raw)
+        _txt4 = _a4.db_label.cget("text")
+        check(
+            f"readout raw={int(_raw)} confirmed={int(_conf)} shows raw flag",
+            ("\u062e\u0627\u0645=" in _txt4) == _want,
+            _txt4,
+        )
+    # المؤشران متفقان فلا فائدة من عرض الخام
+    _a4._update_readouts(_now4, _cmd4, 50.0, True, True)
+    check("readout omits the flag when both agree",
+          "\u062e\u0627\u0645=" not in _a4.db_label.cget("text"),
+          _a4.db_label.cget("text"))
+    _a4.stop()
+finally:
+    try:
+        _r4.destroy()
+    except Exception:
+        pass
 
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
