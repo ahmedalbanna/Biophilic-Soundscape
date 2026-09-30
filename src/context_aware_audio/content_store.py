@@ -234,26 +234,55 @@ class ContentStore:
         )
         self._conn.commit()
 
-    def plays_today(self, window_key: str, day: str) -> int:
+    def plays_today(
+        self, window_key: str, day: str, exclude_outcome: Optional[str] = None
+    ) -> int:
         """
         عدد ما شُغّل من نافذة اليوم.
 
         اليوم نص ISO (YYYY-MM-DD)، والمقارنة نصية عمداً: started_at
         مخزّن ISO فرزه الأبجدي هو الزمن.
+
+        exclude_outcome يطرح صفاً بعينه. «مرة في اليوم» تستعمله
+        لتتجاهل abandoned: مقطع قطعته الصلاة قبل أن يُسمع لم يُبثّ،
+        وعدّاده كان يمنع النافذة بقية اليوم بلا سبب.
         """
-        return int(
-            self._conn.execute(
+        if exclude_outcome:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
+                "AND started_at LIKE ? AND outcome IS NOT ?",
+                (window_key, f"{day}%", exclude_outcome),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
                 "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
                 "AND started_at LIKE ?",
                 (window_key, f"{day}%"),
-            ).fetchone()[0]
-        )
+            ).fetchone()
+        return int(row[0])
 
-    def last_started(self, window_key: str) -> Optional[str]:
-        row = self._conn.execute(
-            "SELECT MAX(started_at) FROM playback_log WHERE window_key=?",
-            (window_key,),
-        ).fetchone()
+    def last_started(
+        self, window_key: str, exclude_outcome: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        آخر بدء في النافذة، أو None إن لم يوجد.
+
+        exclude_outcome يترك صفاً بعينه خارج الحساب. الفجوة بين المقاطع
+        تستعمله لتتجاهل outcome=abandoned: مقطع قطعته الصلاة قبل أن
+        يُسمع لا يُعدّ مقطعاً بُثّ، وإلا أمسكت النافذة ثلاثين دقيقة
+        بعد أن انتهت الصلاة بلا سبب.
+        """
+        if exclude_outcome:
+            row = self._conn.execute(
+                "SELECT MAX(started_at) FROM playback_log "
+                "WHERE window_key=? AND outcome IS NOT ?",
+                (window_key, exclude_outcome),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT MAX(started_at) FROM playback_log WHERE window_key=?",
+                (window_key,),
+            ).fetchone()
         return row[0] if row and row[0] else None
 
     def stats(self) -> List[Tuple[str, int, float]]:
