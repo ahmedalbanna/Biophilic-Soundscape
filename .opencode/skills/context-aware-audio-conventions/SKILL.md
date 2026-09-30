@@ -30,12 +30,13 @@ python tests/test_content_gate.py               #  52 - gate + priority integrat
 python tests/test_content_player.py             #  46 - pygame.music + music_claimed
 python tests/test_content_settings.py           #  41 - settings coercion
 python tests/test_content_pcm.py                #  34 - read_pcm + the tick gate
-python tests/test_content_panel.py              #  42 - the Tk panel (real time)
+python tests/test_content_panel.py              #  51 - the Tk panel (real time)
 python tests/test_simulate.py                   #  25 - scenarios 7 and 8
+python tests/test_prose.py                      #   7 - no CJK, no English prose
 python tests/test_desktop.py                    # 245 checks - assets/player/VAD/prayer/UI
 ```
 
-Before declaring work done: `py_compile` all modules, `pyflakes`, all eleven
+Before declaring work done: `py_compile` all modules, `pyflakes`, all twelve
 test files, and a UI smoke test. `simulate.py` is the fastest way to see a
 decision change take effect.
 
@@ -72,8 +73,15 @@ Content is a guest, not an eighth priority. Every background-emitting branch
 in `engine.py` routes through `_with_content(cmd, frame, ts, now, period)`;
 the two mute branches (prayer, debate) bypass it and call
 `force_stop` / `force_pause`, then `_attach` the result to the command so the
-player still learns. The ambient floor **replaces** `volume_ratio` — multiplying
-it by the duck curve would give 0.20 x 0.10 = 2%, i.e. silence.
+player still learns. The ambient floor is a **ceiling**, applied as
+`min(cmd.volume_ratio, content_ambient_ratio)`.
+
+Not a replacement. Replacing the duck ratio outright pins the background to
+20% whatever the curve decided: at 64.9dB the engine decides 0.10 and the log
+says "90% reduction" while the mixer gets 0.20 — louder than decided, 0.1dB
+from the debate mute, with `MIN_DUCK_RATIO` unreachable for as long as content
+plays. Multiplication is equally wrong for the opposite reason: 0.20 x 0.10 is
+2%, i.e. silence. The ceiling caps in both directions.
 
 Naming: modules snake_case, classes CapWords, one public class per module.
 Prefer descriptive over terse — `athan_moment` beats `is_a`, `set_noise_floor`
@@ -110,6 +118,16 @@ should mean editing config.
 
 Levels are per-period in `period_sounds[...]["db"]` — there are no separate
 `morning_level_db`-style fields. Do not reintroduce them.
+
+Duck ratios are **derived** from `duck_depth` through `engine.duck_max_ratio()`
+and `duck_min_ratio()`. There are no `ducking_max_ratio` / `ducking_min_ratio`
+config fields; they existed, nothing read them, and five tests compared
+against them — agreeing only at the default depth of 70. A config field that
+agrees with the live value at the default and diverges everywhere else is
+worse than an absent one, because editing it appears to work.
+
+`content_gate_delay_min` was also deleted, for the mirror-image reason: the
+spec wrote it, nothing read it, and the engine counts postponements instead.
 
 ## Tests
 
@@ -156,6 +174,27 @@ Conventions that matter:
   `terminate()` is missing will happily pass a handle-leak assertion.
 - `pytest` is not the runner: these scripts call `sys.exit()`, so pytest
   errors during collection. That is expected, not a bug.
+- **No test may depend on the wall clock or the cached prayer schedule.**
+  Two desktop checks did, and both failed on a real afternoon: the debate
+  latch between dhuhr and dhuhr+15min, and the maghrib mute whenever the
+  cached times moved. Disable `engine.prayer.check` for a section that is
+  not about prayer — no fixed set of five times leaves every minute of the
+  day safe. Pin `prayer.set_times` only when the check asserts a specific
+  claim at a specific time. Verify by poisoning `assets/prayer_cache.json`
+  to five minutes ago and re-running.
+
+## Prose is a gate, not a promise
+
+`tests/test_prose.py` fails the build on a CJK character, a replacement
+character, or an English phrase in an Arabic comment. The skill used to ask
+for a manual scan and nobody ran one; two Korean characters reached `vad.py`
+and `README.md` that way, plus five in total across the sources.
+
+Its English check scans only the text after `#`, needs two adjacent Latin
+words before it reports, and carries an allowlist for library names. An
+earlier version scanned whole lines and produced 200 false positives on
+`self.engine`, `False` and `for i in range` — a gate that cries wolf gets
+switched off, so keep it precise even at the cost of coverage.
 
 ## Docstring and comment style
 
