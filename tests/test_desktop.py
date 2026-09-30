@@ -939,5 +939,185 @@ finally:
 check("settings rejects non-dict", settings.save_settings("nope") is False)
 check("settings rejects None", settings.save_settings(None) is False)
 
+# ============ 19) محاكاة الوقت ============
+from src.context_aware_audio.sim_clock import SimClock, MAX_OFFSET_SEC
+
+_c1 = SimClock()
+check("sim: disabled at construction", _c1.enabled is False)
+check(
+    "sim: now() follows real when disabled",
+    abs((_c1.now() - _c1.real_now()).total_seconds()) < 1.0,
+)
+_c1._enabled = True
+_c1.set_hhmmss(2, 0)
+check("sim: now() is faked when enabled", _c1.now().hour == 2, _c1.now())
+check(
+    "sim: real_now() unaffected by enable",
+    abs((_c1.real_now() - datetime.now()).total_seconds()) < 1.0,
+)
+_before = _c1.offset_sec
+_c1.nudge(-1)
+check("sim: nudge(-1) shifts -3600s", abs((_c1.offset_sec - _before) + 3600) < 2,
+      _c1.offset_sec - _before)
+_c1.nudge(1)
+_c1.reset()
+check("sim: reset clears enabled", _c1.enabled is False)
+check("sim: reset clears offset", _c1.offset_sec == 0.0)
+_c2 = SimClock(offset_sec=999_999)
+check("sim: offset clamped to a day", _c2.offset_sec == MAX_OFFSET_SEC, _c2.offset_sec)
+_c2.offset_sec = -999_999
+check("sim: negative offset clamped", _c2.offset_sec == -MAX_OFFSET_SEC, _c2.offset_sec)
+
+# الإزاحة عبر الإعدادات
+_ts3 = tempfile.mkdtemp()
+try:
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_ts3) / n):
+        (Path(_ts3) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": -7200.5}), encoding="utf-8"
+        )
+        check("sim: offset loaded from settings",
+              settings.load_settings()["sim_offset_sec"] == -7200.5)
+        (Path(_ts3) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": 10 ** 9}), encoding="utf-8"
+        )
+        check("sim: offset clamped on load",
+              settings.load_settings()["sim_offset_sec"] == MAX_OFFSET_SEC)
+        (Path(_ts3) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": True}), encoding="utf-8"
+        )
+        check("sim: bool offset rejected",
+              settings.load_settings()["sim_offset_sec"] == 0.0)
+        (Path(_ts3) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": "abc"}), encoding="utf-8"
+        )
+        check("sim: junk offset rejected",
+              settings.load_settings()["sim_offset_sec"] == 0.0)
+        check("sim: offset round-trips",
+              settings.save_settings({"sim_offset_sec": 3600.0})
+              and settings.load_settings()["sim_offset_sec"] == 3600.0)
+finally:
+    import shutil
+
+    shutil.rmtree(_ts3, ignore_errors=True)
+
+# --- انحدار: قفزة الساعة لا تُطلق كتم النقاش ---
+from datetime import time as dtime
+from src.context_aware_audio import ContextAwareAudioEngine
+from src.context_aware_audio.audio_types import AudioFrame
+_eng = ContextAwareAudioEngine(EngineConfig())
+_eng.prayer.set_times(
+    {"fajr": dtime(5, 10), "dhuhr": dtime(12, 5), "asr": dtime(15, 25),
+     "maghrib": dtime(18, 10), "isha": dtime(19, 30)}
+)
+_day = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+_real_t0 = 1_000_000.0
+_eng.process_frame(
+    AudioFrame(timestamp=_real_t0, db_level=70, is_speech=True, is_overlapping=True),
+    _day,
+)
+_eng.process_frame(
+    AudioFrame(timestamp=_real_t0 + 20, db_level=30, is_speech=False), _day
+)
+_still = _eng.process_frame(
+    AudioFrame(timestamp=_real_t0 + 20, db_level=30, is_speech=False),
+    _day.replace(hour=2),
+)
+check(
+    "sim: 13h clock jump does not release the debate mute",
+    _still.state == EngineState.DEBATE_MUTED,
+    _still,
+)
+
+
+# --- انحدار: القفزة لا تمسّ حالة المحرك أو مؤقّت الخمول ---
+import tkinter as tk
+import time as _time
+_root2 = tk.Tk()
+_root2.withdraw()
+try:
+    from src.context_aware_audio.app import DesktopApp
+
+    _app2 = DesktopApp(_root2, log_path=None)
+    _app2.manual_db.set(2.0)
+    _app2.start()
+    for _ in range(6):
+        _root2.update()
+        _time.sleep(0.1)
+    _act_before = _app2.engine._last_activity_time
+    _stamp_before = _app2.engine._last_speech_time
+
+    _app2.sim_on.set(True)
+    _app2._on_sim_toggle()
+    _app2.clock.set_hhmmss(2, 0)
+    for _ in range(6):
+        _root2.update()
+        _time.sleep(0.1)
+
+    check("sim: activity timer untouched by the jump",
+          _app2.engine._last_activity_time == _act_before,
+          f"{_act_before} -> {_app2.engine._last_activity_time}")
+    check("sim: speech timer untouched by the jump",
+          _app2.engine._last_speech_time == _stamp_before)
+
+    # سيناريو تحت ساعة محاكاة لا يضع طابعاً في المستقبل
+    _app2._scenario("talk")
+    _now_real = _app2.clock.real_now().timestamp()
+    _drift = abs(_app2.engine._last_activity_time - _now_real)
+    check("sim: scenario stamps stay on the real timeline",
+          _drift < 30, f"drift={_drift:.1f}s")
+
+    # الانتقال بين الفترات
+    for hour, expect in ((2, "\u0627\u0644\u0644\u064a\u0644"), (15, "\u0627\u0644\u0645\u0642\u064a\u0644")):
+        _app2.clock.set_hhmmss(hour, 0)
+        for _ in range(6):
+            _root2.update()
+            _time.sleep(0.1)
+        check(f"sim: {hour:02d}:00 shows {expect}",
+              expect in _app2.period_text.get(), _app2.period_text.get())
+
+    # دقيقة الأذان الحقيقية بعد التحويل
+    _app2.clock.set_hhmmss(18, 10)
+    for _ in range(8):
+        _root2.update()
+        _time.sleep(0.1)
+    check("sim: 18:10 mutes for maghrib",
+          "prayer_muted" in _app2.state_text.get(), _app2.state_text.get())
+
+    # عناصر اللوحة موجودة
+    check("sim: panel widgets exist",
+          all(hasattr(_app2, n) for n in
+              ("sim_on", "sim_readout", "sim_hour", "sim_minute")))
+    _app2._on_sim_reset()
+    check("sim: reset disables the box", _app2.clock.enabled is False)
+    check("sim: reset clears the offset", _app2.clock.offset_sec == 0.0)
+    check("sim: reset clears the checkbox", _app2.sim_on.get() is False)
+
+    # الحقول تكتب الساعة
+    _app2.sim_on.set(True)
+    _app2._on_sim_toggle()
+    _app2.sim_hour.set(3)
+    for _ in range(3):
+        _root2.update()
+        _time.sleep(0.05)
+    check("sim: hour field drives the clock", _app2.clock.now().hour == 3,
+          _app2.clock.now())
+    check("sim: readout shows both clocks",
+          "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
+          and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
+          _app2.sim_readout.get())
+
+    # الخيار يُحفظ ويعود
+    _app2._save_settings()
+    check("sim: offset persisted in settings snapshot",
+          "sim_offset_sec" in _app2._settings_snapshot(),
+          _app2._settings_snapshot().keys())
+    _app2.stop()
+finally:
+    try:
+        _root2.destroy()
+    except Exception:
+        pass
+
+
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

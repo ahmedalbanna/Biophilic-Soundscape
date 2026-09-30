@@ -46,6 +46,7 @@ src/context_aware_audio/
   mic_input.py          # sounddevice/pyaudio + calibration
   settings.py           # JSON persistence
   sound_synth.py        # numpy WAV generation
+  sim_clock.py          # fakes wall clock for testing; engine is untouched
   app.py                # Tkinter UI
   simulate.py           # scenario runner
 ```

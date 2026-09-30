@@ -33,6 +33,7 @@ from src.context_aware_audio.prayer_provider import (
 )
 from src.context_aware_audio.real_player import RealPlayer
 from src.context_aware_audio.settings import load_settings, save_settings
+from src.context_aware_audio.sim_clock import SimClock
 from src.context_aware_audio.sound_synth import ensure_assets, missing_assets
 from src.context_aware_audio.vad import VadProcessor
 
@@ -43,6 +44,11 @@ SAVE_EVERY_TICKS = 25  # نبضة واحدة كل ~5 ثوانٍ
 METER_H = 22  # ارتفاع شريط قياس الـ dB
 CALIBRATE_SEC = 2.0  # مدة قياس ضجيج الغرفة
 ATHAN_VOLUME = 0.8  # مستوى نغمة تنبيه الأذان
+SIM_HINT = (
+    "الأزمنة المدوّنة زمن حقيقي: 10ث هدوء، 60س نقاش، 5د سكون."
+    + chr(10)
+    + "لعرض «الليل» اضبط dB على صفر وانتظر 5 دقائق."
+)
 
 
 AUTOSTART_MARKER = "rem context-aware-audio-autostart"
@@ -157,7 +163,7 @@ class DesktopApp:
     def __init__(self, root, log_path: Optional[Path] = None):
         self.root = root
         self.root.title("Context-Aware Audio Engine - Sanaa Desktop")
-        self.root.geometry("660x800")
+        self.root.geometry("660x960")
         self.log_path = log_path
 
         self.config = EngineConfig()
@@ -165,6 +171,7 @@ class DesktopApp:
         self.vad = VadProcessor(self.config)
         self.player = RealPlayer()
         self._settings = load_settings()
+        self.clock = SimClock(offset_sec=self._settings.get("sim_offset_sec", 0.0))
         self.mic = MicInput(device=self._settings.get("mic_device"))
         self._mic_devices = MicInput.list_devices()
 
@@ -172,6 +179,11 @@ class DesktopApp:
         self.use_mic = tk.BooleanVar(value=bool(self._settings.get("use_mic")))
         self.manual_db = tk.DoubleVar(value=25.0)
         self.greeting = tk.BooleanVar(value=False)
+        self.sim_on = tk.BooleanVar(value=False)
+        self.sim_readout = tk.StringVar(value="-")
+        self.sim_hour = tk.IntVar(value=self.clock.now().hour)
+        self.sim_minute = tk.IntVar(value=self.clock.now().minute)
+        self._updating = False  # يمنع إعادة الدخول عند تحديث الحقول برمجياً
         self.prayer_source = tk.StringVar(value="...")
         self.status_text = tk.StringVar(value="متوقف")
         self.period_text = tk.StringVar(value="-")
@@ -253,6 +265,7 @@ class DesktopApp:
             "use_mic": bool(self.use_mic.get()),
             "mic_device": self.mic.device,
             "athan_enabled": bool(self.athan_enabled.get()),
+            "sim_offset_sec": self.clock.offset_sec,
         }
 
     def _save_settings(self) -> bool:
@@ -293,6 +306,8 @@ class DesktopApp:
         self.meter.pack(fill="x", pady=4)
         self.db_label = ttk.Label(info, text="dB: 0")
         self.db_label.pack(anchor="w")
+
+        self._build_sim_panel(f)
 
         src = ttk.LabelFrame(f, text="مصدر الصوت", padding=8)
         src.pack(fill="x", pady=6)
@@ -378,7 +393,7 @@ class DesktopApp:
 
         logf = ttk.LabelFrame(f, text="السجل", padding=8)
         logf.pack(fill="both", expand=True, pady=6)
-        self.log = tk.Text(logf, height=10, font=("Consolas", 9))
+        self.log = tk.Text(logf, height=8, font=("Consolas", 9))
         self.log.pack(fill="both", expand=True)
 
     def _on_device(self):
@@ -403,6 +418,59 @@ class DesktopApp:
             self.autostart.set(is_autostart())
         state = "on" if is_autostart() else "off"
         self._log(f"autostart={state} (طلب={'on' if wanted else 'off'}، نجح={ok})")
+
+    def _build_sim_panel(self, parent):
+        """
+        لوحة محاكاة الوقت.
+
+        الحقول مدخلات لا مخرجات: قيمها تُكتب عند الضبط فقط. تُربط
+        بـ trace لأن command في Spinbox لا يُستدعى عند الكتابة اليدوية.
+        والحارس ضروري لأن trace يُستدعى أيضاً على الكتابة البرمجية،
+        فبدونه يعيد إدخاله نفسه ويصارع الدقيقة.
+        """
+        box = ttk.LabelFrame(parent, text="محاكاة الوقت", padding=8)
+        box.pack(fill="x", pady=6)
+
+        ttk.Checkbutton(
+            box, text="محاكاة الوقت", variable=self.sim_on, command=self._on_sim_toggle
+        ).pack(anchor="w")
+
+        ttk.Label(box, textvariable=self.sim_readout, font=("Consolas", 9)).pack(
+            anchor="w", pady=(4, 2)
+        )
+
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text="الساعة").pack(side="left", padx=(0, 4))
+        hbox = ttk.Spinbox(row, from_=0, to=23, width=4, textvariable=self.sim_hour)
+        hbox.pack(side="left")
+        ttk.Label(row, text="الدقيقة").pack(side="left", padx=(10, 4))
+        mbox = ttk.Spinbox(row, from_=0, to=59, width=4, textvariable=self.sim_minute)
+        mbox.pack(side="left")
+
+        # trace بدل command: يلتقط الكتابة اليدوية والأسهم معاً
+        self.sim_hour.trace_add("write", self._on_sim_time)
+        self.sim_minute.trace_add("write", self._on_sim_time)
+
+        nav = ttk.Frame(box)
+        nav.pack(fill="x", pady=4)
+        ttk.Button(nav, text="-1 س", command=lambda: self._on_sim_nudge(-1)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(nav, text="+1 س", command=lambda: self._on_sim_nudge(1)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(nav, text="عودة للوقت الحقيقي", command=self._on_sim_reset).pack(
+            side="left", padx=2
+        )
+
+        ttk.Label(
+            box,
+            text=SIM_HINT,
+            font=("Segoe UI", 8),
+            foreground="#666",
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
 
     def _log(self, msg: str):
         """يكتب سطراً في لوحة السجل، وفي ملف السجل عبر stdout.
@@ -507,8 +575,11 @@ class DesktopApp:
         """
         if not self.running:
             self.start()
-        now = datetime.now()
-        ts = now.timestamp()
+        now = self.clock.now()
+        # الطابع زمن حقيقي: لو أخذ الطابع من الساعة المحاكاة لأصبح
+        # الإطار المزروع في المستقبل بـ 12 ساعة عند الضبط على 02:00،
+        # فينتهي تبريد النقاش ومؤقت النشاط فوراً.
+        ts = self.clock.real_now().timestamp()
         if kind == "debate":
             fr = AudioFrame(
                 timestamp=ts, db_level=70, is_speech=True, is_overlapping=True
@@ -558,11 +629,21 @@ class DesktopApp:
         return float(self.manual_db.get())
 
     def _tick(self):
-        """نبضة واحدة كل 200ms: تحدّث الواجهة وتغذّي المحرك بإطار صوتي."""
+        """
+        نبضة واحدة كل 200ms: تحدّث الواجهة وتغذّي المحرك بإطار صوتي.
+
+        الفصل هنا هو جوهر محاكاة الوقت: `now` قد يكون مزيفاً ليراه
+        المحرك فيقرر (الفترة، نافذة الصلاة)، بينما `real_now` حقيقي
+        لطوابع الإطارات. لو استُعملت الساعة المحاكاة للطوابع لأمكن
+        فكّ مؤقتات المحرك كلها بقفزة واحدة.
+        """
         try:
             self._drain_prayer_queue()
-            now = datetime.now()
-            if self._prayer_date is not None and now.date() != self._prayer_date:
+            now = self.clock.now()
+            real_now = self.clock.real_now()
+            # تغيّر التاريخ يُقاس بالزمن الحقيقي: قفزة محاكاة عبر منتصف
+            # الليل لا تستدعي إعادة تحميل المواقيت بلا فائدة.
+            if self._prayer_date is not None and real_now.date() != self._prayer_date:
                 self._prayer_date = None
                 self._athan_played.clear()
                 self._load_prayer_async()
@@ -570,7 +651,8 @@ class DesktopApp:
                 self._maybe_play_athan(now)
             db = self._current_db()
             self._apply_output_settings(now, db)
-            auto = self.vad.analyze_frame(db, timestamp=now.timestamp())
+            # الطابع زمن حقيقي دائماً - هذا هو السطر المحوري.
+            auto = self.vad.analyze_frame(db, timestamp=real_now.timestamp())
             if self.greeting.get():
                 auto.is_greeting_tone = True
                 auto.is_speech = True
@@ -580,10 +662,74 @@ class DesktopApp:
                 self._update_readouts(now, cmd, db, auto.is_speech)
             else:
                 self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
+            self._update_sim_readout(now, real_now)
             self._maybe_save_settings()
         except Exception as e:
             self._log(f"خطأ في النبضة: {e}")
         self.root.after(TICK_MS, self._tick)
+
+    # ---------- محاكاة الوقت ----------
+    def _on_sim_toggle(self):
+        """
+        تفعيل/تعطيل محاكاة الساعة.
+
+        الإزاحة المحفوظة تُستعاد عند أول تفعيل حتى لا تكون مخزَّنة بلا
+        فائدة. لا نمسّ حالة المحرك: مؤقّتاتها على الزمن الحقيقي، وتصفيرها
+        عند القفزة كان سيهدم عدّاد الخمول بلا داع.
+        """
+        self.clock._enabled = bool(self.sim_on.get())
+        if self.clock.enabled and not self.clock.offset_sec:
+            self._sync_sim_fields()
+        self._log(
+            f"محاكاة الوقت: {'مفعّلة' if self.clock.enabled else 'معطّلة'} "
+            f"(إزاحة {self.clock.offset_sec:+.0f}ث)"
+        )
+
+    def _on_sim_time(self, *_args):
+        """تغيير حقل الساعة أو الدقيقة - يُستدعى من trace لا من command."""
+        if self._updating:
+            return
+        try:
+            hour = int(self.sim_hour.get())
+            minute = int(self.sim_minute.get())
+        except (TypeError, ValueError, tk.TclError):
+            return
+        self._updating = True
+        try:
+            self.clock.set_hhmmss(hour, minute)
+        finally:
+            self._updating = False
+
+    def _on_sim_nudge(self, hours: float):
+        self.clock.nudge(hours)
+        self._sync_sim_fields()
+        self._log(f"إزاحة الساعة {hours:+.0f}س -> {self.clock.offset_sec:+.0f}ث")
+
+    def _on_sim_reset(self):
+        """عودة كاملة: تعطيل المحاكاة وتصفير الإزاحة."""
+        self.clock.reset()
+        self.sim_on.set(False)
+        self._sync_sim_fields()
+        self._log("عودة إلى الوقت الحقيقي")
+
+    def _sync_sim_fields(self):
+        """يكتب الساعة المحاكاة في حقول الإدخال مع حارس ضد إعادة الدخول."""
+        self._updating = True
+        try:
+            now = self.clock.now()
+            self.sim_hour.set(now.hour)
+            self.sim_minute.set(now.minute)
+        finally:
+            self._updating = False
+
+    def _update_sim_readout(self, now, real_now):
+        """يعرض الساعتين. القراءة هنا هي المرجع، لا قيم الحقول."""
+        if not self.clock.enabled:
+            self.sim_readout.set(f"الحقيقي: {real_now:%Y-%m-%d %H:%M:%S}")
+            return
+        self.sim_readout.set(
+            f"المحاكى: {now:%Y-%m-%d %H:%M:%S}   |   الحقيقي: {real_now:%H:%M:%S}"
+        )
 
     def _maybe_play_athan(self, now: datetime):
         """يشغّل نغمة الأذان مرة واحدة عند لحظة الأذان."""
