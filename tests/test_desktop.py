@@ -545,6 +545,40 @@ with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
     m2c.stop()
     check("pyaudio: reader thread cleared on stop", m2c._thread is None)
 
+# اختيار الجهاز يصل إلى pyaudio أيضاً
+with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
+    _opened = {}
+
+    def _capture(**kw):
+        _opened.update(kw)
+        return _FakeStream()
+
+    _reset_pa_counters()
+    m2e = MicInput()
+    m2e._sd = None
+    m2e._pyaudio = sys.modules["pyaudio"]
+    m2e.backend = "pyaudio"
+    m2e.available = True
+    with mock.patch.object(_FakePA, "open", side_effect=_capture):
+        m2e.start()
+    check(
+        "pyaudio: device selection honoured",
+        _opened.get("input_device_index") is None,
+        _opened,
+    )
+    m2e.stop()
+
+    _opened.clear()
+    m2e.device = 3
+    with mock.patch.object(_FakePA, "open", side_effect=_capture):
+        m2e.start()
+    check(
+        "pyaudio: chosen device passed to open()",
+        _opened.get("input_device_index") == 3,
+        _opened,
+    )
+    m2e.stop()
+
 # بديل عند تعذّر sounddevice
 with mock.patch.dict(sys.modules, {"pyaudio": _fake_pyaudio()}):
     m2d = MicInput()
@@ -758,6 +792,83 @@ with mock.patch.dict(sys.modules, {"pygame": _miss_pg}):
     out = pl3.apply(bad)
     check("player reports PLAY-FAILED for missing asset", "PLAY-FAILED" in out, out)
     pl3.stop()
+
+# أصل تالف (لا ناقص): pygame.error يرث RuntimeError لا OSError، وwave.Error
+# ليس فرعاً منه. هذا هو ما فوّته تضييق except السابق.
+_corrupt = assets_dir() / "corrupt_probe.wav"
+_corrupt.write_bytes(b"RIFFnotreallyawavefile" * 30)
+try:
+    import pygame as _real_pg  # noqa: F401  (اختياري)
+
+    try:
+        _real_pg.mixer.Sound(str(_corrupt))
+        _sound_raises = None
+    except Exception as _e:
+        _sound_raises = _e
+    check(
+        "corrupt asset: pygame raises a non-OSError",
+        _sound_raises is not None
+        and not isinstance(_sound_raises, (OSError, ValueError)),
+        f"{type(_sound_raises).__name__}",
+    )
+
+    # عبر المشغّل الحقيقي: يجب PLAY-FAILED لا استثناء هارب
+    with mock.patch.dict(sys.modules, {"pygame": _real_pg}):
+        pl5 = RealPlayer()
+        bad5 = PlaybackCommand(
+            file=_corrupt.name,
+            target_db=38,
+            volume_ratio=1.0,
+            fade_duration_sec=0.1,
+            state=EngineState.DAILY_AMBIENT,
+            reason="t",
+        )
+        out5 = pl5.apply(bad5)
+        check(
+            "corrupt asset: reports PLAY-FAILED, does not raise",
+            "PLAY-FAILED" in out5,
+            out5,
+        )
+        check(
+            "corrupt asset: current_file not advanced (no retry loop)",
+            pl5.current_file != _corrupt.name,
+            pl5.current_file,
+        )
+        # لا إغراق في السجل: يُبلَّغ مرة ثم يُحاول مرة واحدة
+        again5 = pl5.apply(bad5)
+        check(
+            "corrupt asset: second apply does not re-log failure",
+            "PLAY-FAILED" not in again5,
+            again5,
+        )
+        check(
+            "corrupt asset: second apply says skipped",
+            "PLAY-SKIPPED" in again5,
+            again5,
+        )
+        check(
+            "corrupt asset: still quarantined",
+            _corrupt.name in pl5._broken_assets,
+            pl5._broken_assets,
+        )
+        # تغيّر الملف على القرص يُسمح بإعادة المحاولة
+        _corrupt.write_bytes(b"RIFFstillbrokenfile" * 40)
+        third5 = pl5.apply(bad5)
+        check(
+            "corrupt asset: changed file is retried",
+            "PLAY-FAILED" in third5,
+            third5,
+        )
+        check(
+            "corrupt asset: state never advances to a dead file",
+            pl5.current_file != _corrupt.name,
+            pl5.current_file,
+        )
+        pl5.stop()
+except Exception as e:  # pygame غير متاح في بيئة الاختبار
+    check("corrupt asset path exercised", False, repr(e))
+finally:
+    _corrupt.unlink(missing_ok=True)
 
 # مسار winsound: أصل مفقود يجب ألا يُعلن PLAY
 pl4 = RealPlayer()

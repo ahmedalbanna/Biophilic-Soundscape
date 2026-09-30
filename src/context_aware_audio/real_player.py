@@ -20,6 +20,12 @@ from .sound_synth import ensure_assets
 CROSSFADE_CHANNELS = 2
 ALERT_CHANNEL = 7
 
+# أخطاء تحميل الأصول - ما ترميه فعلياً مكتبات snd وwave وpygame:
+#   - الملف الناقص  -> FileNotFoundError (فرع من OSError)
+#   - الملف التالف  -> pygame.error (فرع من RuntimeError) أو wave.Error
+# تضييق المجموعة إلى (OSError, ValueError) كان يُفوّت التلف بصمت.
+ASSET_ERRORS = (OSError, ValueError, RuntimeError, wave.Error)
+
 
 class RealPlayer:
     """مشغّل حقيقي بصوت فعلي: crossfade، fade ناعم، master volume، وEQ."""
@@ -39,6 +45,7 @@ class RealPlayer:
         self._winsound = None
         self._pg = None
         self._sounds = {}
+        self._broken_assets: dict = {}
         self._active_idx = 0
         self._ramp_gen = 0
         try:
@@ -106,7 +113,7 @@ class RealPlayer:
                     w.writeframes(pcm.tobytes())
             self._scaled_cache[key] = str(dst)
             return str(dst)
-        except (OSError, ValueError) as e:
+        except ASSET_ERRORS as e:
             # الرجوع بلا تخفيض = تشغيل بصوت كامل رغم طلب خفض.
             # نُبلغ بدل ادّعاء أن التخفيض نجح بصمت.
             print(f"volume scaling failed for {name}@{bucket}: {e}")
@@ -186,19 +193,42 @@ class RealPlayer:
                 old_ch.fadeout(fade_ms)
             else:
                 old_ch.stop()
-        except Exception:
-            try:
-                self._pg.mixer.music.load(str(assets_dir() / name))
-                self._pg.mixer.music.set_volume(vol)
-                self._pg.mixer.music.play(loops=-1, fade_ms=max(0, fade_ms))
-            except Exception:
-                pass
+        except (AttributeError, TypeError):
+            # بعض بناء pygame لا تدعم Channel ككائن - نعود إلى music.
+            # لا نبتلع أخطاء الأصول هنا: music.load لا ترمي على ملف تالف،
+            # فابتلاعها كان يحوّل "لم يعمل" إلى "PLAY" صامت.
+            self._pg.mixer.music.load(str(assets_dir() / name))
+            self._pg.mixer.music.set_volume(vol)
+            self._pg.mixer.music.play(loops=-1, fade_ms=max(0, fade_ms))
         self._active_idx = new_idx
+
+    # ---------- الأصول التالفة ----------
+    @staticmethod
+    def _asset_stamp(name: str):
+        """بصمة الملف (زمن التعديل والحجم) لتحديد تغيّره أو غيابه."""
+        try:
+            st = (assets_dir() / name).stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def _mark_broken(self, name: str) -> None:
+        self._broken_assets[name] = self._asset_stamp(name)
+
+    def _is_broken(self, name: str) -> bool:
+        """هل الملف تالف ولم يتغيّر منذ آخر محاولة؟ (stat رخيص، مرة لكل ملف)"""
+        if name not in self._broken_assets:
+            return False
+        if self._asset_stamp(name) != self._broken_assets[name]:
+            del self._broken_assets[name]  # تغيّر أو حُذف: نسمح بإعادة المحاولة
+            return False
+        return True
 
     # ---------- API ----------
     def apply(self, cmd: PlaybackCommand) -> str:
         with self._lock:
             eff = self._effective(cmd.volume_ratio)
+            advanced = False  # هل الصوت أصبح ممثّلاً فعلاً؟
             if cmd.is_muted or cmd.file is None or self.master_muted or eff <= 0.001:
                 action = "MUTE"
                 if not self.is_muted:
@@ -212,14 +242,23 @@ class RealPlayer:
                 self.current_volume = 0.0
             elif self._pg is not None:
                 fade_ms = int(max(0.0, cmd.fade_duration_sec) * 1000)
-                if self.is_muted or self.current_file != cmd.file:
+                if self._is_broken(cmd.file):
+                    # نُبلغ مرة واحدة. لا إعادة محاولة إلا إذا تغيّر الملف فعلاً
+                    # (استُبدل أو أُصلح) - وإلا تحوّل الخطأ إلى إغراق في السجل.
+                    action = f"PLAY-SKIPPED {cmd.file} (broken, unchanged)"
+                elif self.is_muted or self.current_file != cmd.file:
                     try:
                         self._ramp_gen += 1
                         self._pg_crossfade(cmd.file, eff, fade_ms or 400)
                         action = f"PLAY {cmd.file} vol={eff:.0%}"
-                    except (OSError, ValueError) as e:
-                        # ملف ناقص أو تالف: نُبلغ بدل ادّعاء التشغيل
+                        advanced = True
+                    except ASSET_ERRORS as e:
+                        # ملف ناقص أو تالف: نُبلغ بدل ادّعاء التشغيل، ولا
+                        # نضبط current_file على ملف لم يعمل. pygame.error يرث
+                        # RuntimeError وwave.Error ليسا من OSError.
+                        self._mark_broken(cmd.file)
                         action = f"PLAY-FAILED {cmd.file} ({e})"
+                        print(action)
                 else:
                     if abs(eff - self.current_volume) >= 0.01:
                         self._ramp_volume(
@@ -231,9 +270,11 @@ class RealPlayer:
                         action = f"FADE {cmd.file} {self.current_volume:.0%}->{eff:.0%}"
                     else:
                         action = f"KEEP {cmd.file} vol={eff:.0%}"
-                self.current_file = cmd.file
-                self.current_volume = eff
-                self.is_muted = False
+                    advanced = True
+                if advanced:
+                    self.current_file = cmd.file
+                    self.current_volume = eff
+                    self.is_muted = False
             else:
                 path = self._scaled_path(cmd.file, eff)
                 key = (cmd.file, round(eff * 10) / 10)
@@ -241,15 +282,20 @@ class RealPlayer:
                 if self.is_muted or current_key != key:
                     if path is None:
                         # الأصل غير موجود: لا شيء يعمل، ونقول ذلك
+                        self._mark_broken(cmd.file)
                         action = f"PLAY-FAILED {cmd.file} (asset missing)"
+                        print(action)
                     else:
                         self._play_loop_winsound(path)
                         action = f"PLAY {cmd.file} vol={eff:.0%}"
+                        advanced = True
                 else:
                     action = f"KEEP {cmd.file} vol={eff:.0%}"
-                self.current_file = cmd.file
-                self.current_volume = eff
-                self.is_muted = False
+                    advanced = True
+                if advanced:
+                    self.current_file = cmd.file
+                    self.current_volume = eff
+                    self.is_muted = False
             line = f"{action} [{cmd.state.value}] {cmd.reason} (backend={self.backend})"
             self.history.append(line)
             return line

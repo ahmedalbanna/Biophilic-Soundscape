@@ -7,6 +7,7 @@ settings.py - حفظ إعدادات سطح المكتب محلياً (JSON)
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -41,7 +42,7 @@ def _as_float(value: Any, default: float, low: float, high: float) -> float:
         out = float(value)
     except (TypeError, ValueError):
         return default
-    if out != out or out in (float("inf"), float("-inf")):  # NaN / inf
+    if not math.isfinite(out):  # NaN أو ±inf
         return default
     return low if out < low else high if out > high else out
 

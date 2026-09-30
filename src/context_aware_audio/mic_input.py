@@ -146,13 +146,25 @@ class MicInput:
         except Exception:
             return False
         try:
-            stream = pa.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=self.sample_rate,
-                input=True,
-                frames_per_buffer=1600,
-            )
+            # اختيار الجهاز مطلوب: بدونه يفتح pyaudio مدخل النظام الافتراضي
+            # وتصبح قائمة الأجهزة في الواجهة بلا أثر على هذا المسار.
+            if self.device is not None:
+                stream = pa.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=self.sample_rate,
+                    input=True,
+                    input_device_index=self.device,
+                    frames_per_buffer=1600,
+                )
+            else:
+                stream = pa.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=self.sample_rate,
+                    input=True,
+                    frames_per_buffer=1600,
+                )
         except Exception:
             # فشل الفتح بعد إنشاء الكائن: يجب إنهاؤه وإلا تسرّب منفذ
             _safe_terminate(pa)
@@ -267,8 +279,8 @@ class MicInput:
         finally:
             self._stream = None
             self._join_reader()
-            # مهم: _pa هو *الكائن* لا الوحدة. إنهاء الوحدة لا يُغلق منفذ
-            # PortAudio، فكل تشغيل tanpa إنهاء = مقبض مسرّب.
+            # مهم: _pa هو الكائن لا الوحدة. إنهاء الوحدة لا يُغلق منفذ
+            # PortAudio، فكل تشغيل بلا إنهاء يعني مقبضاً مسرّباً.
             _safe_terminate(self._pa)
             self._pa = None
             self._pyaudio = None

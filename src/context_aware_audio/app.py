@@ -126,9 +126,14 @@ def set_autostart(on: bool) -> bool:
     try:
         target = startup_bat_path()
         if not on:
-            # لا نحذف ملفاً لم نكتبه نحن
-            if target.exists() and _is_our_bat(target):
-                target.unlink(missing_ok=True)
+            if not target.exists():
+                return True
+            if not _is_our_bat(target):
+                # لا نحذف ملفاً لم نكتبه نحن، ولا ندّعي أننا أوقفنا شيئاً.
+                # False تعني للمستخدم أن التشغيل التلقائي ما زال فعالاً.
+                print(f"autostart: {target} ليس ملفنا (لا يحتوي العلامة) - لم يُحذف")
+                return False
+            target.unlink(missing_ok=True)
             return True
         target.parent.mkdir(parents=True, exist_ok=True)
         if getattr(sys, "frozen", False):
@@ -391,8 +396,13 @@ class DesktopApp:
             self._log(f"mic device error: {e}")
 
     def _on_autostart(self):
-        ok = set_autostart(bool(self.autostart.get()))
-        self._log(f"autostart={'on' if self.autostart.get() else 'off'} ok={ok}")
+        wanted = bool(self.autostart.get())
+        ok = set_autostart(wanted)
+        if not ok:
+            # الفشل يجب أن يُعاد إلى الواجهة: وإلا بقي المؤشر خاطئاً
+            self.autostart.set(is_autostart())
+        state = "on" if is_autostart() else "off"
+        self._log(f"autostart={state} (طلب={'on' if wanted else 'off'}، نجح={ok})")
 
     def _log(self, msg: str):
         """يكتب سطراً في لوحة السجل، وفي ملف السجل عبر stdout.
@@ -529,8 +539,8 @@ class DesktopApp:
     def _scenario_db(self) -> float | None:
         """مستوى dB المزروع ما زال سارياً، وإلا None.
 
-        يُعيد قيمة السيناريو نفسه لا قيمة ثابتة، وإلا contra العدّاد
-        والتسمية على الشاشة يخالفان ما يقوله السجل.
+        يُعيد قيمة السيناريو نفسه لا قيمة ثابتة، وإلا خالف العدّاد
+        والتسمية على الشاشة ما يقوله السجل.
         """
         if self._scenario_until and time.time() < self._scenario_until:
             return self._scenario_db_value

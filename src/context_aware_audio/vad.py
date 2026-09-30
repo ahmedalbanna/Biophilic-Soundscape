@@ -26,7 +26,6 @@ class VadProcessor:
     def __init__(self, config: EngineConfig):
         self.config = config
         self._prev_db: float = 0.0
-        self._prev_time: float = time.time()
         self._has_prev: bool = False
         self.noise_floor_db: Optional[float] = None
         # نافذة الترحيب: نحتفظ بأقصى قفزة خلال فترة الاستمرار
@@ -57,7 +56,6 @@ class VadProcessor:
         بعد ضغط المستخدم على "تشغيل". يُستدعى مع engine.reset().
         """
         self._prev_db = 0.0
-        self._prev_time = time.time()
         self._has_prev = False
         self._elevated_since = None
         self._peak_jump_db = 0.0
@@ -126,7 +124,6 @@ class VadProcessor:
             raw_energy=self.db_to_energy(db_level),
         )
         self._prev_db = db_level
-        self._prev_time = ts
         self._has_prev = True
         return frame
 
