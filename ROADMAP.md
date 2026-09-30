@@ -264,8 +264,8 @@ simulate.py          محاكاة السيناريوهات الستة
 ### التحقق الحالي
 
 ```
-tests/test_engine.py    37/37 ناجح
-tests/test_desktop.py   164/164 ناجح
+tests/test_engine.py    84/84 ناجح
+tests/test_desktop.py   226/226 ناجح
 py_compile / pyflakes   نظيف
 simulate.py             6 سيناريوهات
 اختبار دخان للواجهة    سجل + معايرة + 4 سيناريوهات + بدء مع Windows

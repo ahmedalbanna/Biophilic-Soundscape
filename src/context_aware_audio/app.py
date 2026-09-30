@@ -214,6 +214,7 @@ class DesktopApp:
         self._last_eq = -1.0
         self._last_player = self.player
         self._player_error_logged = False
+        self._player_error = ""
         self.autostart = tk.BooleanVar(value=is_autostart())
         self._save_counter = 0
         self.period_eq = {
@@ -669,15 +670,19 @@ class DesktopApp:
             if self.running:
                 cmd = self.engine.process_frame(auto, now)
                 # عطل في التشغيل لا يجب أن يوقف قراءة الواجهة: نعزله هنا
-                # ليبقى العدّاد والساعة يعملان، ونكتفي بتسجيله مرة واحدة.
+                # ليبقى العدّاد والساعة يعملان. ونُظهره في القراءة أيضاً،
+                # فسطر واحد في السجل لا يكفي: الواجهة كانت تعلن حالة
+                # عادية بينما لا صوت في الواقع.
                 try:
                     self.player.apply(cmd)
                 except Exception as e:
+                    self._player_error = str(e)
                     if not self._player_error_logged:
                         self._log(f"عطل في التشغيل: {e}")
                         self._player_error_logged = True
                 else:
                     self._player_error_logged = False
+                    self._player_error = ""
                 self._update_readouts(now, cmd, db, auto.is_speech, auto.is_speech_raw)
             else:
                 self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
@@ -692,9 +697,13 @@ class DesktopApp:
         """
         تفعيل/تعطيل محاكاة الساعة.
 
-        الإزاحة المحفوظة تُستعاد عند أول تفعيل حتى لا تكون مخزَّنة بلا
-        فائدة. لا نمسّ حالة المحرك: مؤقّتاتها على الزمن الحقيقي، وتصفيرها
-        عند القفزة كان سيهدم عدّاد الخمول بلا داع.
+        لا نلمس الإزاحة هنا: هي تُستعاد عند الإنشاء من sim_offset_sec
+        المحفوظ، فلا يحتاج التفعيل إلى استرجاع شيء. الشرط الوحيد هو
+        مزامنة حقول الإدخال عند أول تفعيل بلا إزاحة، وإلا عرضت الحقول
+        ساعة بناء من جلسة سابقة.
+
+        لا نمسّ حالة المحرك: مؤقّتاتها على الزمن الحقيقي، وتصفيرها عند
+        القفزة كان سيهدم عدّاد الخمول بلا داع.
         """
         self.clock.set_enabled(bool(self.sim_on.get()))
         if self.clock.enabled and not self.clock.offset_sec:
@@ -705,7 +714,13 @@ class DesktopApp:
         )
 
     def _on_sim_time(self, *_args):
-        """تغيير حقل الساعة أو الدقيقة - يُستدعى من trace لا من command."""
+        """
+        تغيير حقل الساعة أو الدقيقة - يُستدعى من trace لا من command.
+
+        تعديل الحقل طلبٌ لتحريك الساعة، فالمحاكاة تُفعَّل عنده. تركها
+        معطّلة كان يعني تخزين إزاحة صامتة تُطبَّق عند أول ضغطة على المربع
+        لاحقاً، وهي مفاجأة لا تخدم شيئاً.
+        """
         if self._updating:
             return
         try:
@@ -716,6 +731,10 @@ class DesktopApp:
             # بقي الحقل يعرض قيمة لم تصل الساعة أصلاً.
             self._sync_sim_fields()
             return
+        if not self.clock.enabled:
+            self.sim_on.set(True)
+            self._on_sim_toggle()
+            self._log(f"فُعّلت المحاكاة بتعديل الحقل إلى {hour:02d}:{minute:02d}")
         self._updating = True
         try:
             self.clock.set_hhmmss(hour, minute)
@@ -801,6 +820,12 @@ class DesktopApp:
         label = PERIOD_LABELS_AR.get(period, period.value)
         self.period_text.set(f"الفترة: {label} ({period.value})")
         self.state_text.set(f"الحالة: {cmd.state.value} - {cmd.reason}")
+        if self._player_error:
+            # الحالة أعلاه من قرار المحرك، فالصوت لا يتبعها.
+            # نلفت النظر بدل ترك المستخدم يقرأ "يومية" ويظن أن الصوت يعمل.
+            self.state_text.set(
+                f"⚠ بلا صوت: {self._player_error[:40]} | {self.state_text.get()}"
+            )
         # عند اختلاف المؤشرين نعرض الخام أيضاً: هو ما يفسّر تأخّر 200ms
         # الذي يفرضه فلتر الثبات، وإلا بدا الكتم غير مبرَّر.
         speech_txt = f"كلام={int(is_speech) * 1}"
@@ -830,8 +855,10 @@ class DesktopApp:
         if self._save_counter < SAVE_EVERY_TICKS:
             return
         self._save_counter = 0
-        if not save_settings(self._settings_snapshot()):
-            self._log("تعذر حفظ الإعدادات")
+        # عبر _save_settings لا save_settings مباشرة: هناك طريقتان
+        # للمفاتيح نفسها، وتحديث self._settings يحدث في واحدة فقط. يوم
+        # تضيف مفتاحاً وتسقطه من الأخرى يظهر الفرق عند إعادة القراءة.
+        self._save_settings()
 
 
 def main(log_path: Optional[Path] = None) -> None:

@@ -22,6 +22,9 @@ from .config import EngineConfig
 # بكثير من أي فاصل إطارات حقيقي، فيصلح الحساب ولا يوسّع النافذة فعلياً.
 EPS = 1e-6
 
+# حصة webrtcvad التي تعني "لم يرصد صوتاً": يمنع التأكيد ولا يلغي المؤكَّد
+VETO_RATIO = 0.3
+
 
 def elapsed(ts: float, start: Optional[float], span: float) -> bool:
     """
@@ -32,9 +35,11 @@ def elapsed(ts: float, start: Optional[float], span: float) -> bool:
     فرق الأعداد العشرية: 100.8 - 100.5 = 0.2999999999999545.
     توحيدها هنا يمنع تكرار الخطأ عند كل مقارنة جديدة.
     """
+    # max(0.0, ...): طابع متأخر أو رجوع ساعة يعطي فرقاً سالباً،
+    # فيجمّد النافذة المفتوحة حتى يلحق الزمن الحقيقي.
     if start is None:
         return False
-    return ts - start >= span - EPS
+    return max(0.0, ts - start) >= span - EPS
 
 
 class VadProcessor:
@@ -60,8 +65,10 @@ class VadProcessor:
         self._elevated_since: Optional[float] = None
         self._peak_jump_db: float = 0.0
         self._last_greeting_time: float = 0.0
-        # تاريخ المستويات لقياس القفزة على نافذة حقيقية لا إطار واحد
-        self._history: Deque[Tuple[float, float]] = deque(maxlen=64)
+        # تاريخ المستويات لقياس القفزة على نافذة حقيقية لا إطار واحد.
+        # maxlen سقف أمان فقط: القصّ الحقيقي بالزمن في _trim_history،
+        # فالعدد وحده يقطع النافذة صامتة عند استدعاء أسرع من 200ms.
+        self._history: Deque[Tuple[float, float]] = deque(maxlen=256)
         # -inf حتى لا تحجب أول عملية تأكيد cooldown عند أي طابع زمني
         self._last_confirmed_speech: float = float("-inf")
         self.webrtc_available: bool = importlib.util.find_spec("webrtcvad") is not None
@@ -108,22 +115,29 @@ class VadProcessor:
 
     def _window_jump(self, ts: float, db_level: float) -> float:
         """
-        أقصى ارتفاع خلال نافذة بداية النبرة، لا منذ الإطار السابق.
+        أكبر قفزة *بين إطارين متتاليين* داخل نافذة بداية النبرة.
 
-        القياس من الإطار الأخير يجعل أي ارتفاع 200ms qualify كبداية،
-        فيستحق greeting_onset_window_sec صامتاً. نقيس من أقدم عينة
-        ما زالت داخل النافذة.
+        النافذة تحدد أين نبحث عن البداية، لا كم ارتفعت الإجمالي.
+        القياس من أخفض عينة داخل النافذة يجعل أي صعود بطيء يبدو
+        قفزة: سلّم 5dB كل إطار يبلغ 35dB إجمالاً فيُطلق نبرة ترحيب
+        على إغلاق باب أو مرور شاحنة. القفزة الحادة هي ما يميّز
+        الترحيب، فنقيس معدل الصعود لا حصيلة صعود طويل.
         """
         window = self.config.greeting_onset_window_sec
-        baseline: Optional[float] = None
-        # من الأحدث للأقدم: القطع عند أول عينة خارج النافذة.
-        for sample_ts, sample_db in reversed(self._history):
-            if ts - sample_ts > window:
-                break
-            baseline = sample_db if baseline is None else min(baseline, sample_db)
-        if baseline is None:
+        # من الأحدث للأقدم، والقطع عند أول عينة خارج النافذة
+        samples = [
+            (s_ts, s_db)
+            for s_ts, s_db in reversed(self._history)
+            if ts - s_ts <= window
+        ]
+        if not samples:
             return 0.0
-        return db_level - baseline
+        best = db_level - samples[0][1]  # القفزة من آخر عينة إلى الآن
+        for i in range(len(samples) - 1):
+            rise = samples[i][1] - samples[i + 1][1]
+            if rise > best:
+                best = rise
+        return best
 
     def _update_speech(self, db_level: float, ts: float) -> Tuple[bool, bool]:
         """
@@ -229,19 +243,54 @@ class VadProcessor:
         self._prev_db = db_level
         self._has_prev = True
         self._history.append((ts, db_level))
+        self._trim_history(ts)
         return frame
 
-    def analyze_pcm(self, pcm_bytes: bytes, sample_rate: int = 16000) -> AudioFrame:
-        """تحليل PCM حقيقي (16-bit mono): RMS -> dB، مع دمج قرار webrtcvad إن وُجد."""
+    def _trim_history(self, ts: float) -> None:
+        """
+        يحذف ما خرج من نافذة بداية النبرة.
+
+        الاكتفاء بعداد ثابت يقطع النافذة صامتة عند استدعاء أسرع من
+        نبضة الواجهة: 64 عينة تكفي 1.5ث عند 200ms، لكنها لا تكفي عند
+        50ms، فتفقد كل قفزة حادة لأن خطأها صار خارج المدى المحسوب.
+        """
+        cutoff = ts - self.config.greeting_onset_window_sec
+        while self._history and self._history[0][0] < cutoff:
+            self._history.popleft()
+
+    def analyze_pcm(
+        self,
+        pcm_bytes: bytes,
+        sample_rate: int = 16000,
+        timestamp: Optional[float] = None,
+    ) -> AudioFrame:
+        """
+        تحليل PCM حقيقي (16-bit mono): RMS -> dB، مع veto من webrtcvad.
+
+        المسار غير موصول بالميكروفون بعد، لكن واجهته يجب أن تكون صالحة
+        لو وُصل: يستقبل timestamp مثل analyze_frame وإلا فلا يمكن إشباع
+        نافذة البدء (0.2ث) أبداً، فيبقى غير قابل للاختبار.
+
+        قرار webrtcvad veto على *البدء* فقط: يمنع تأكيد كلام لم يرصده
+        الكاشف. ولا يمسّ قراراً مؤكّداً، لأن إطاراً واحداً غير مسموع كان
+        سيلغي نافذة الإبطال (0.4ث) التي أضافها فلتر الثبات، فيعود
+        الخطأ نفسه - "إطار واحد يقرّر" - من باب آخر.
+        """
         db = self.pcm_to_db(pcm_bytes)
-        frame = self.analyze_frame(db)
+        frame = self.analyze_frame(db, timestamp=timestamp)
         if self._webrtc_vad is not None and sample_rate in (8000, 16000, 32000, 48000):
             voiced_ratio = self._voiced_ratio(pcm_bytes, sample_rate)
-            if voiced_ratio is not None:
-                frame.is_speech = bool(frame.is_speech and voiced_ratio > 0.3)
-                frame.is_overlapping = bool(
-                    frame.is_speech and db >= self.config.loud_debate_threshold_db
-                )
+            if (
+                voiced_ratio is not None
+                and voiced_ratio <= VETO_RATIO
+                and not self._speech_confirmed
+            ):
+                # الكاشف لم يرصد صوتاً: لا نبدأ، ونلغي أي بدء معلّق.
+                # إن كان الكلام مؤكَّداً ففلتر الطاقة يبقى صاحب القرار.
+                self._above_since = None
+                frame.is_speech = False
+                frame.is_speech_raw = False
+                frame.is_overlapping = False
         return frame
 
     def _voiced_ratio(self, pcm_bytes: bytes, sample_rate: int) -> Optional[float]:

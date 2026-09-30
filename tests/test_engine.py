@@ -387,5 +387,156 @@ for _ in range(20):  # صوت مرتفع مستمر: ليس قفزة
 check("صوت مرتفع مستمر ليس ترحيباً", not _f.is_greeting_tone, str(_f))
 
 
+
+# 13) مراجعة: قفزة النبرة، veto تحليل PCM، نافذة التاريخ
+import inspect
+
+from src.context_aware_audio.vad import VadProcessor, elapsed
+
+STEP = 0.2
+
+
+cfg = EngineConfig()
+
+
+def greeting_after(ramp_frames, step_db, hold=10, quiet=10):
+    """هدوء، ثم صعود تدريجي، ثم ثبات. كم مرة أُطلقت نبرة الترحيب؟"""
+    v = VadProcessor(cfg)
+    t = 6000.0
+    for _ in range(quiet):
+        v.analyze_frame(30.0, timestamp=t)
+        t += STEP
+    db = 30.0
+    fired = 0
+    for _ in range(ramp_frames):
+        db += step_db
+        fired += int(v.analyze_frame(db, timestamp=t).is_greeting_tone)
+        t += STEP
+    for _ in range(hold):
+        fired += int(v.analyze_frame(db, timestamp=t).is_greeting_tone)
+        t += STEP
+    return fired
+
+
+# 1) صعود بطيء ليس بداية نبرة
+check("ramp 5 dB/frame does not fire", greeting_after(9, 5.0) == 0)
+check("ramp 2.5 dB/frame does not fire", greeting_after(18, 2.5) == 0)
+check("ramp 1 dB/frame does not fire", greeting_after(36, 1.0) == 0)
+# الصعود الحاد يبقى مقبولاً
+check("abrupt 45 dB jump fires", greeting_after(1, 45.0) > 0)
+check("sharp 15 dB/frame fires", greeting_after(3, 15.0) > 0)
+
+# 2) نافذة البداية مرئية: القفزة الحادة محدودة بزمن
+_slow = EngineConfig()
+_slow.greeting_onset_window_sec = 0.05  # لا تتسع إلا لإطار واحد
+
+
+def greeting_with(cfg_override, ramp_frames, step_db):
+    v = VadProcessor(cfg_override)
+    t = 6000.0
+    for _ in range(10):
+        v.analyze_frame(30.0, timestamp=t)
+        t += STEP
+    db = 30.0
+    fired = 0
+    for _ in range(ramp_frames):
+        db += step_db
+        fired += int(v.analyze_frame(db, timestamp=t).is_greeting_tone)
+        t += STEP
+    for _ in range(10):
+        fired += int(v.analyze_frame(db, timestamp=t).is_greeting_tone)
+        t += STEP
+    return fired
+
+
+check(
+    "onset window is load-bearing: 0.05s rejects a 2-frame rise",
+    greeting_with(_slow, 2, 22.5) == 0,
+    greeting_with(_slow, 2, 22.5),
+)
+check(
+    "onset window is load-bearing: 1.5s accepts a 2-frame rise",
+    greeting_with(cfg, 2, 22.5) > 0,
+    greeting_with(cfg, 2, 22.5),
+)
+
+
+# 3) تاريخ المستويات يُقصّ بالزمن لا بالعدد
+_fast = VadProcessor(cfg)
+_t = 6000.0
+for i in range(200):  # 20ms: أسرع بكثير من نبضة الواجهة
+    _fast.analyze_frame(30.0, timestamp=_t)
+    _t += 0.02
+check(
+    "history trimmed by time at 20ms sampling",
+    len(_fast._history) <= 1.5 / 0.02 + 2,
+    len(_fast._history),
+)
+_grew = False
+# عند 20ms يحتاج onset (0.2ث = 10 إطارات) + sustain (0.3ث = 15) = 25+
+for _ in range(40):
+    _t += 0.02
+    _f = _fast.analyze_frame(75.0, timestamp=_t)
+    _grew = _grew or _f.is_greeting_tone
+check("sharp onset still detected at 20ms sampling", _grew)
+
+
+# 4) analyze_pcm: veto على البدء فقط
+class _FakeVad:
+    def __init__(self, ratio):
+        self.ratio = ratio
+        self.n = 0
+
+    def is_speech(self, chunk, rate):
+        self.n += 1
+        return self.n <= int(self.ratio * 1000)
+
+
+def pcm(db=50.0, samples=1600):
+    import math
+
+    amp = int(32767 * (10 ** ((db - 100) / 20)))
+    return struct.pack(
+        f"<{samples}h", *[int(amp * math.sin(i / 20)) for i in range(samples)]
+    )
+
+
+
+check(
+    "analyze_pcm accepts timestamp",
+    "timestamp" in inspect.signature(VadProcessor.analyze_pcm).parameters,
+)
+
+# نداءات سريعة متتابعة: نافذة 0.2ث قابلة للإشباع
+_v = VadProcessor(cfg)
+_speech = 0
+for i in range(6):
+    _f = _v.analyze_pcm(pcm(50.0), timestamp=1000.0 + i * STEP)
+    _speech += int(_f.is_speech)
+check("rapid analyze_pcm can confirm speech", _speech >= 4, _speech)
+
+# veto يمنع البدء
+_v2 = VadProcessor(cfg)
+_v2._webrtc_vad = _FakeVad(0.0)
+_f = None
+for i in range(5):
+    _f = _v2.analyze_pcm(pcm(50.0), timestamp=2000.0 + i * STEP)
+check("voiced_ratio=0 vetoes the onset", not _f.is_speech, str(_f))
+check("veto also clears is_speech_raw", not _f.is_speech_raw, str(_f))
+
+# veto لا يلمس قراراً مؤكّداً
+_v3 = VadProcessor(cfg)
+for i in range(4):
+    _f = _v3.analyze_pcm(pcm(50.0), timestamp=3000.0 + i * STEP)
+check("speech confirmed before the veto", _f.is_speech, str(_f))
+_v3._webrtc_vad = _FakeVad(0.0)
+_f = _v3.analyze_pcm(pcm(50.0), timestamp=3000.8)
+check("one unvoiced frame does not drop confirmed speech", _f.is_speech, str(_f))
+
+
+# 5) elapsed لا يتجمّد على طابع متأخر
+check("elapsed: backwards stamp is clamped to zero", not elapsed(10.0, 20.0, 0.2))
+check("elapsed: normal span still passes", elapsed(20.2, 20.0, 0.2))
+
 print(f"\nالنتيجة: {PASSED} ناجح / {FAILED} فاشل")
 sys.exit(1 if FAILED else 0)

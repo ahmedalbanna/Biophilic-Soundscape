@@ -31,6 +31,10 @@ from src.context_aware_audio.vad import VadProcessor
 PASSED = FAILED = 0
 
 
+# حجم settings.json الحقيقي قبل أي اختبار: يقارنه الحارس في النهاية
+_real_settings_path = assets_dir() / "settings.json"
+_real_size = _real_settings_path.stat().st_size if _real_settings_path.exists() else 0
+
 def check(name, cond, extra=""):
     global PASSED, FAILED
     if cond:
@@ -1062,118 +1066,130 @@ check(
 import tkinter as tk
 import time as _time
 
-_root2 = tk.Tk()
-_root2.withdraw()
+# هذا التطبيق ينشئ كائنات حقيقية تحفظ إعداداتها. بدون عزل المسار
+# يكتب الاختبار إلى settings.json الحقيقي، وهو ملف مُتجاهَل في git
+# فلا يظهر التغيير في git status بينما يفسد إعدادات المستخدم فعلياً.
+_sim_home = tempfile.mkdtemp()
 try:
-    from src.context_aware_audio.app import DesktopApp
-
-    _app2 = DesktopApp(_root2, log_path=None)
-    _app2.manual_db.set(2.0)
-    _app2.start()
-    for _ in range(6):
-        _root2.update()
-        _time.sleep(0.1)
-    _act_before = _app2.engine._last_activity_time
-    _stamp_before = _app2.engine._last_speech_time
-
-    _app2.sim_on.set(True)
-    _app2._on_sim_toggle()
-    _app2.clock.set_hhmmss(2, 0)
-    for _ in range(6):
-        _root2.update()
-        _time.sleep(0.1)
-
-    check(
-        "sim: activity timer untouched by the jump",
-        _app2.engine._last_activity_time == _act_before,
-        f"{_act_before} -> {_app2.engine._last_activity_time}",
-    )
-    check(
-        "sim: speech timer untouched by the jump",
-        _app2.engine._last_speech_time == _stamp_before,
-    )
-
-    # سيناريو تحت ساعة محاكاة لا يضع طابعاً في المستقبل
-    _app2._scenario("talk")
-    _now_real = _app2.clock.real_now().timestamp()
-    _drift = abs(_app2.engine._last_activity_time - _now_real)
-    check(
-        "sim: scenario stamps stay on the real timeline",
-        _drift < 30,
-        f"drift={_drift:.1f}s",
-    )
-
-    # الانتقال بين الفترات
-    for hour, expect in (
-        (2, "\u0627\u0644\u0644\u064a\u0644"),
-        (15, "\u0627\u0644\u0645\u0642\u064a\u0644"),
+    with mock.patch.object(
+        settings, "writable_path", lambda n: Path(_sim_home) / n
     ):
-        _app2.clock.set_hhmmss(hour, 0)
-        for _ in range(6):
-            _root2.update()
-            _time.sleep(0.1)
-        check(
-            f"sim: {hour:02d}:00 shows {expect}",
-            expect in _app2.period_text.get(),
-            _app2.period_text.get(),
-        )
+        _root2 = tk.Tk()
+        _root2.withdraw()
+        try:
+            from src.context_aware_audio.app import DesktopApp
 
-    # دقيقة الأذان الحقيقية بعد التحويل
-    _app2.clock.set_hhmmss(18, 10)
-    for _ in range(8):
-        _root2.update()
-        _time.sleep(0.1)
-    check(
-        "sim: 18:10 mutes for maghrib",
-        "prayer_muted" in _app2.state_text.get(),
-        _app2.state_text.get(),
-    )
+            _app2 = DesktopApp(_root2, log_path=None)
+            _app2.manual_db.set(2.0)
+            _app2.start()
+            for _ in range(6):
+                _root2.update()
+                _time.sleep(0.1)
+            _act_before = _app2.engine._last_activity_time
+            _stamp_before = _app2.engine._last_speech_time
 
-    # عناصر اللوحة موجودة
-    check(
-        "sim: panel widgets exist",
-        all(
-            hasattr(_app2, n)
-            for n in ("sim_on", "sim_readout", "sim_hour", "sim_minute")
-        ),
-    )
-    _app2._on_sim_reset()
-    check("sim: reset disables the box", _app2.clock.enabled is False)
-    check("sim: reset clears the offset", _app2.clock.offset_sec == 0.0)
-    check("sim: reset clears the checkbox", _app2.sim_on.get() is False)
+            _app2.sim_on.set(True)
+            _app2._on_sim_toggle()
+            _app2.clock.set_hhmmss(2, 0)
+            for _ in range(6):
+                _root2.update()
+                _time.sleep(0.1)
 
-    # الحقول تكتب الساعة
-    _app2.sim_on.set(True)
-    _app2._on_sim_toggle()
-    _app2.sim_hour.set(3)
-    for _ in range(3):
-        _root2.update()
-        _time.sleep(0.05)
-    check(
-        "sim: hour field drives the clock",
-        _app2.clock.now().hour == 3,
-        _app2.clock.now(),
-    )
-    check(
-        "sim: readout shows both clocks",
-        "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
-        and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
-        _app2.sim_readout.get(),
-    )
+            check(
+                "sim: activity timer untouched by the jump",
+                _app2.engine._last_activity_time == _act_before,
+                f"{_act_before} -> {_app2.engine._last_activity_time}",
+            )
+            check(
+                "sim: speech timer untouched by the jump",
+                _app2.engine._last_speech_time == _stamp_before,
+            )
 
-    # الخيار يُحفظ ويعود
-    _app2._save_settings()
-    check(
-        "sim: offset persisted in settings snapshot",
-        "sim_offset_sec" in _app2._settings_snapshot(),
-        _app2._settings_snapshot().keys(),
-    )
-    _app2.stop()
+            # سيناريو تحت ساعة محاكاة لا يضع طابعاً في المستقبل
+            _app2._scenario("talk")
+            _now_real = _app2.clock.real_now().timestamp()
+            _drift = abs(_app2.engine._last_activity_time - _now_real)
+            check(
+                "sim: scenario stamps stay on the real timeline",
+                _drift < 30,
+                f"drift={_drift:.1f}s",
+            )
+
+            # الانتقال بين الفترات
+            for hour, expect in (
+                (2, "\u0627\u0644\u0644\u064a\u0644"),
+                (15, "\u0627\u0644\u0645\u0642\u064a\u0644"),
+            ):
+                _app2.clock.set_hhmmss(hour, 0)
+                for _ in range(6):
+                    _root2.update()
+                    _time.sleep(0.1)
+                check(
+                    f"sim: {hour:02d}:00 shows {expect}",
+                    expect in _app2.period_text.get(),
+                    _app2.period_text.get(),
+                )
+
+            # دقيقة الأذان الحقيقية بعد التحويل
+            _app2.clock.set_hhmmss(18, 10)
+            for _ in range(8):
+                _root2.update()
+                _time.sleep(0.1)
+            check(
+                "sim: 18:10 mutes for maghrib",
+                "prayer_muted" in _app2.state_text.get(),
+                _app2.state_text.get(),
+            )
+
+            # عناصر اللوحة موجودة
+            check(
+                "sim: panel widgets exist",
+                all(
+                    hasattr(_app2, n)
+                    for n in ("sim_on", "sim_readout", "sim_hour", "sim_minute")
+                ),
+            )
+            _app2._on_sim_reset()
+            check("sim: reset disables the box", _app2.clock.enabled is False)
+            check("sim: reset clears the offset", _app2.clock.offset_sec == 0.0)
+            check("sim: reset clears the checkbox", _app2.sim_on.get() is False)
+
+            # الحقول تكتب الساعة
+            _app2.sim_on.set(True)
+            _app2._on_sim_toggle()
+            _app2.sim_hour.set(3)
+            for _ in range(3):
+                _root2.update()
+                _time.sleep(0.05)
+            check(
+                "sim: hour field drives the clock",
+                _app2.clock.now().hour == 3,
+                _app2.clock.now(),
+            )
+            check(
+                "sim: readout shows both clocks",
+                "\u0627\u0644\u0645\u062d\u0627\u0643\u0649" in _app2.sim_readout.get()
+                and "\u0627\u0644\u062d\u0642\u064a\u0642\u064a" in _app2.sim_readout.get(),
+                _app2.sim_readout.get(),
+            )
+
+            # الخيار يُحفظ ويعود
+            _app2._save_settings()
+            check(
+                "sim: offset persisted in settings snapshot",
+                "sim_offset_sec" in _app2._settings_snapshot(),
+                _app2._settings_snapshot().keys(),
+            )
+            _app2.stop()
+        finally:
+            try:
+                _root2.destroy()
+            except Exception:
+                pass
 finally:
-    try:
-        _root2.destroy()
-    except Exception:
-        pass
+    import shutil
+
+    shutil.rmtree(_sim_home, ignore_errors=True)
 
 
 # ============ 20) عزل أعطال التشغيل + واجهة الساعة ============
@@ -1332,6 +1348,113 @@ finally:
         _r4.destroy()
     except Exception:
         pass
+
+
+# ============ 22) حارس: الاختبارات لا تكتب إلى إعدادات المستخدم ============
+# هذا الملف مُتجاهَل في git، فالكتابة إليه لا تُظهر شيئاً في git status
+# لكنها تُفسد إعدادات المستخدم فعلياً. أوضحها: محاكاة الساعة مفعّلة تلقائياً.
+# أي اختبار ينشئ DesktopApp ويحفظ يجب أن يغلّف settings.writable_path.
+_real_settings = assets_dir() / "settings.json"
+check(
+    "guard: real settings.json untouched by the suite",
+    not _real_settings.exists() or _real_settings.stat().st_size == _real_size,
+    f"size={_real_settings.stat().st_size if _real_settings.exists() else 0}"
+    f" expected={_real_size}",
+)
+
+# ============ 23) تعديل حقل الساعة يفعّل المحاكاة ============
+# تركها معطّلة كان يعني تخزين إزاحة صامتة تُطبَّق عند أول ضغطة على
+# المربع لاحقاً: مخاطرة الظهور فجأة بلا سبب ظاهر للمستخدم.
+_sim_home2 = tempfile.mkdtemp()
+try:
+    with mock.patch.object(
+        settings, "writable_path", lambda n: Path(_sim_home2) / n
+    ):
+        _r5 = tk.Tk()
+        _r5.withdraw()
+        try:
+            from src.context_aware_audio.app import DesktopApp
+
+            _a5 = DesktopApp(_r5, log_path=None)
+            check("sim: starts disabled", _a5.clock.enabled is False)
+            _a5.sim_hour.set(2)
+            for _ in range(4):
+                _r5.update()
+                _time.sleep(0.05)
+            check("sim: editing the field enables simulation",
+                  _a5.clock.enabled is True)
+            check("sim: checkbox follows", _a5.sim_on.get() is True)
+            check("sim: the edit took effect", _a5.clock.now().hour == 2,
+                  _a5.clock.now())
+
+            _a5._on_sim_reset()
+            check("sim: reset disables", _a5.clock.enabled is False)
+            check("sim: reset zeroes offset", _a5.clock.offset_sec == 0.0)
+            _a5.sim_hour.set(5)
+            for _ in range(4):
+                _r5.update()
+                _time.sleep(0.05)
+            check("sim: a second edit re-enables", _a5.clock.enabled is True)
+            check("sim: second edit applied", _a5.clock.now().hour == 5,
+                  _a5.clock.now())
+            _a5.stop()
+        finally:
+            try:
+                _r5.destroy()
+            except Exception:
+                pass
+finally:
+    import shutil
+
+    shutil.rmtree(_sim_home2, ignore_errors=True)
+
+# ============ 24) عطل التشغيل يظهر في القراءة لا في السجل وحده ============
+_fault_home = tempfile.mkdtemp()
+try:
+    with mock.patch.object(
+        settings, "writable_path", lambda n: Path(_fault_home) / n
+    ):
+        _r6 = tk.Tk()
+        _r6.withdraw()
+        try:
+            _a6 = DesktopApp(_r6, log_path=None)
+            _a6.manual_db.set(30.0)
+            _a6.start()
+            for _ in range(6):
+                _r6.update()
+                _time.sleep(0.1)
+            _cmd6 = PlaybackCommand(
+                file=None, target_db=0, volume_ratio=0.0,
+                fade_duration_sec=0.0, state=EngineState.DAILY_AMBIENT,
+                reason="t",
+            )
+            _a6._update_readouts(
+                _a6.clock.now(), _cmd6, 30.0, False, False
+            )
+            check("readout clean before the fault",
+                  "بلا صوت" not in _a6.state_text.get(),
+                  _a6.state_text.get()[:50])
+            _a6._player_error = "boom"
+            _a6._update_readouts(
+                _a6.clock.now(), _cmd6, 30.0, False, False
+            )
+            check("readout warns when nothing is playing",
+                  "بلا صوت" in _a6.state_text.get(),
+                  _a6.state_text.get()[:50])
+            check("readout keeps the engine state visible",
+                  "daily_ambient" in _a6.state_text.get(),
+                  _a6.state_text.get()[:70])
+            _a6._player_error = ""
+            _a6.stop()
+        finally:
+            try:
+                _r6.destroy()
+            except Exception:
+                pass
+finally:
+    import shutil
+
+    shutil.rmtree(_fault_home, ignore_errors=True)
 
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")

@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from .audio_types import PlaybackCommand
+from .real_player import HISTORY_LIMIT
 
 
 class SimulatedPlayer:
@@ -43,4 +44,6 @@ class SimulatedPlayer:
 
         line = f"{action} | {cmd.state.value} | {cmd.reason}"
         self.history.append((time.time(), str(cmd), line))
+        if len(self.history) > HISTORY_LIMIT:
+            del self.history[: len(self.history) - HISTORY_LIMIT]
         return line
