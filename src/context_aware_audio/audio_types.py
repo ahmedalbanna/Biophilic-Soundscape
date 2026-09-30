@@ -55,9 +55,12 @@ class AudioFrame:
     is_speech: bool = False  # نتيجة VAD بعد فلتر الثبات
     is_speech_raw: bool = False  # تجاوز العتبة في هذا الإطار وحده
     is_overlapping: bool = False  # هل هناك تداخل أصوات (صخب)؟
-    threshold_db: float = 40.0  # عتبة الكلام السارية وقت هذا الإطار
     is_greeting_tone: bool = False  # نبرة ترحيب مرتفعة
     raw_energy: float = 0.0  # طاقة خام (اختياري)
+    # آخر القائمة، وكل حقل جديد بعدها: حقل له قيم افتراضية وسط
+    # حقولٍ قبله لا يُعطَّل Python، لكنه خطّاف صامت لمن يضيف حقلاً
+    # في الوسط ظنّاً أن الترتيب لا أثر له.
+    threshold_db: float = 40.0  # عتبة الكلام السارية وقت هذا الإطار
 
 
 @dataclass

@@ -640,7 +640,7 @@ class DesktopApp:
                 return key
         return ""
 
-    def _content_tick(self, cmd, now):
+    def _content_tick(self, cmd):
         """
         ينفّذ قرار المحتوى على المشغّل. القرار يبقى في المحرك.
 
@@ -1130,7 +1130,7 @@ class DesktopApp:
             # cmd قد يكون None: النبضة تعمل قبل «ابدأ» وبعد كل ضغطة
             # إيقاف. _content_tick محتاجة المنادى كلّه حتى تتجدّد قراءة
             # اللوحة، فلا يسقط النداء مع فرع المحرك.
-            self._content_tick(cmd, now)
+            self._content_tick(cmd)
             self._update_sim_readout(now, real_now)
             self._maybe_save_settings()
         except Exception as e:

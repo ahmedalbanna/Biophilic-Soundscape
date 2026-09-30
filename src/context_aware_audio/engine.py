@@ -86,7 +86,7 @@ class ContextAwareAudioEngine:
             self._in_debate_mute = False  # الصلاة تلغي أي حالة أخرى
             # الصلاة فوق كل شيء: ينتهي السرد ويُصفَّف قبل الإرجاع،
             # فلا يبقى مؤقّت معلّق يعيد التشغيل بعد دقائق.
-            _cc = self.content.force_stop(f"🕌 {prayer_reason}")
+            narration = self.content.force_stop(f"🕌 {prayer_reason}")
             return self._attach(
                 self._cmd(
                     None,
@@ -97,7 +97,7 @@ class ContextAwareAudioEngine:
                     f"🕌 {prayer_reason}",
                     muted=True,
                 ),
-                _cc,
+                narration,
             )
 
         # === 2) نقاش حامي > 65dB ===
@@ -106,7 +106,7 @@ class ContextAwareAudioEngine:
         ):
             self._in_debate_mute = True
             self._last_loud_time = ts
-            _cc = self.content.force_pause(f"نقاش حامي {frame.db_level:.0f}dB")
+            narration = self.content.force_pause(f"نقاش حامي {frame.db_level:.0f}dB")
             return self._attach(
                 self._cmd(
                     None,
@@ -117,7 +117,7 @@ class ContextAwareAudioEngine:
                     f"نقاش حامي {frame.db_level:.0f}dB - كتم تلقائي",
                     muted=True,
                 ),
-                _cc,
+                narration,
             )
 
         if self._in_debate_mute:
@@ -130,7 +130,7 @@ class ContextAwareAudioEngine:
                 self._in_debate_mute = False  # هدأ المجلس 60 ثانية -> عودة
             else:
                 # المجلس ما زال صاخباً: السرد يبقى متوقفاً
-                _cc = self.content.force_pause("المجلس ما زال صاخباً")
+                narration = self.content.force_pause("المجلس ما زال صاخباً")
                 return self._attach(
                     self._cmd(
                         None,
@@ -141,7 +141,7 @@ class ContextAwareAudioEngine:
                         f"انتظار هدوء المجلس ({calm_sec:.0f}/{cfg.debate_cooldown_sec:.0f} ث)",
                         muted=True,
                     ),
-                    _cc,
+                    narration,
                 )
 
         # === 3) ترحيب ضيوف ===
@@ -318,6 +318,29 @@ class ContextAwareAudioEngine:
         )
 
     @staticmethod
+    def _blend_content(cmd, decision):
+        """
+        ينقل حقول قرار المحتوى إلى أمر الخلفية.
+
+        الحقول الثلاثة (الملف والمستوى والموضع) في كل نبضة: المشغّل
+        يحتاجها باستمرار لا عند الانتقال. أما الإجراء فلا يُنقل إلا
+        عند الانتقال — بقاؤه على الأمر يجعل المشغّل يعيد تنفيذ الفعل
+        في كل ضربة.
+
+        هذا مسار واحد لموضعين كانا ينسخان الحقول نفسها ويختلفان في
+        سطر واحد، فأي حقل جديد ينساه أحدهما.
+        """
+        cmd.content_file = decision.file
+        cmd.content_volume = decision.volume
+        cmd.content_position_sec = decision.position_sec
+        if decision.action is not ContentAction.NONE:
+            cmd.content_action = decision.action
+            cmd.reason = f"{cmd.reason} | {decision.reason}"
+        elif decision.is_audible and decision.reason:
+            cmd.reason = f"{cmd.reason} | {decision.reason}"
+        return cmd
+
+    @staticmethod
     def _attach(cmd, decision):
         """
         يضع قرار المحتوى على أمر الخلفية بلا تغيير مستوى الخلفية.
@@ -326,13 +349,7 @@ class ContextAwareAudioEngine:
         محرك المحتوى بأنفسهما. لولا هذا المساعد لابتلع إيقاف الصلاة
         نتيجته: ينتهي السرد في الذاكرة ويظل المشغّل يبثّه.
         """
-        cmd.content_file = decision.file
-        cmd.content_action = decision.action
-        cmd.content_volume = decision.volume
-        cmd.content_position_sec = decision.position_sec
-        if decision.action is not ContentAction.NONE:
-            cmd.reason = f"{cmd.reason} | {decision.reason}"
-        return cmd
+        return ContextAwareAudioEngine._blend_content(cmd, decision)
 
     def _with_content(self, cmd, frame, ts, now, period):
         """
@@ -352,9 +369,8 @@ class ContextAwareAudioEngine:
         )
         # حقول المحتوى تُملأ في كل نبضة: المشغّل يحتاج الملف والموقع
         # في كل نبضة لا في نبضة الانتقال وحدها، وقراءة الواجهة كذلك.
-        cmd.content_file = decision.file
-        cmd.content_volume = decision.volume
-        cmd.content_position_sec = decision.position_sec
+        # أما الإجراء فينتقل عند الانتقال وحده.
+        self._blend_content(cmd, decision)
 
         # أرضية الخلفية تُطبَّق ما دام المسار مسموعاً، لا عند الانتقال
         # فقط. الرجوع المبكر على NONE كان يرفع الخلفية إلى 100% في
@@ -372,12 +388,6 @@ class ContextAwareAudioEngine:
         # السرد يعمل، ويبقى الخفض العميق عميقاً كما صُمِّم.
         if decision.is_audible and not cmd.is_muted:
             cmd.volume_ratio = min(cmd.volume_ratio, self.config.content_ambient_ratio)
-
-        if decision.action is not ContentAction.NONE:
-            cmd.content_action = decision.action
-            cmd.reason = f"{cmd.reason} | {decision.reason}"
-        elif decision.is_audible and decision.reason:
-            cmd.reason = f"{cmd.reason} | {decision.reason}"
         return cmd
 
     # ---------- أدوات ----------

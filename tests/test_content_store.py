@@ -170,8 +170,52 @@ with ContentStore(db) as s2:
     check("store: sequence survives reopen", s2.get("story_a")["sequence_index"] == 1)
     check("store: duration survives reopen", s2.get("story_a")["duration_sec"] == 999.0)
 
-import shutil
+# القوس الختاميّ
 
-shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ===== 9) قصّ السجل: متاح، وغير مربوط تلقائياً =====
+# playback_log ينمو بلا حد. القصّ دالة في المخزن لا نداء عند الإقلاع:
+# حذف تاريخ المستخدم قراره، ومن يعمل تسعين يوماً يظنّ السجل يبقى.
+check("prune: the method exists", hasattr(ContentStore, "prune_older_than"))
+check(
+    "prune: the cutoff is injected, not read from the clock",
+    "today" in ContentStore.prune_older_than.__code__.co_varnames,
+    ContentStore.prune_older_than.__code__.co_varnames,
+)
+
+_pdb = Path(tmp) / "prune.db"
+with ContentStore(_pdb) as pstore:
+    for i, day in enumerate(
+        ("2025-01-01", "2026-03-15", "2026-08-30", "2026-09-30")
+    ):
+        cid = f"clip{i}"
+        pstore.upsert(
+            cid, f"t{i}", f"{cid}.mp3", "story", "maqil_story", i,
+            60.0, 5.0, 0.2,
+        )
+        lid = pstore.log_start(cid, "maqil_story", f"{day}T10:00:00")
+        pstore.log_finish(lid, OUTCOME_COMPLETED, 60.0, f"{day}T10:01:00")
+
+    check("prune: four rows before pruning", len(pstore.stats()) == 4,
+          len(pstore.stats()))
+    check("prune: zero days removes nothing",
+          pstore.prune_older_than(0, today="2026-09-30") == 0)
+    check("prune: a negative window removes nothing",
+          pstore.prune_older_than(-5, today="2026-09-30") == 0)
+
+    removed = pstore.prune_older_than(90, today="2026-09-30")
+    check("prune: ninety days removes the two old rows", removed == 2, removed)
+    left = {r[0] for r in pstore.stats()}
+    check("prune: the recent rows survive", left == {"clip2", "clip3"},
+          sorted(left))
+    check("prune: the clip index is untouched", pstore.count() == 4, pstore.count())
+    check("prune: today counts survive",
+          pstore.plays_today("maqil_story", "2026-09-30") == 1,
+          pstore.plays_today("maqil_story", "2026-09-30"))
+    check("prune: a second call is a no-op",
+          pstore.prune_older_than(90, today="2026-09-30") == 0)
+    check("prune: the store is still usable after pruning",
+          pstore.next_for_window("maqil_story") is not None)
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")
 sys.exit(1 if FAILED else 0)

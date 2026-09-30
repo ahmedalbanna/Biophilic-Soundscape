@@ -12,7 +12,7 @@ against ملف، وتُغلق، ولا تفترض وجود الصوت.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -47,6 +47,19 @@ CREATE INDEX IF NOT EXISTS idx_log_started ON playback_log(started_at);
 CREATE INDEX IF NOT EXISTS idx_log_window  ON playback_log(window_key, started_at);
 """
 
+# لا فهرس على audio_content(window_key, sequence_index)، مع أن الاستعلام
+# يفلتر بالنافذة ويرتّب بالتسلسل ويبدو نازلاً لفهرس. قِسْ ولا تخمّن:
+#
+#   صفوف    بلا فهرس    مع فهرس
+#      200      327 us     379 us
+#    2000     2.9 ms      4.0 ms
+#   20000      34 ms     264 ms
+#
+# الفهرس ثمانية أضعاف أبطأ في الأخير. السبب أن الترتيب يحتاج شجرة
+# مؤقتة على أي حال، فالمسح ثم الترتيب أرخص من اجتياز الفهرس ثم فحص
+# `NOT EXISTS` لكل صف مرشّح فيه. ومكتبة بيت في مقطعين أو ثلاثة؛ ولو
+# كبرت يوماً فالعلاج تحديد عدد المرشّحين، لا فهرس أعمى.
+
 # نتائج ممكنة لسجل التشغيل. مكتوبة كنصوص لا كأعداد حتى يبقى السجل
 # مقروءاً بقاعدة البيانات نفسها بلا رجوع إلى الشيفرة.
 OUTCOME_COMPLETED = "completed"
@@ -63,10 +76,14 @@ class ContentStore:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        # بلا check_same_thread=False: كان مفعّلاً بلا قفل.
+        # الإذن الصامت أخطر من القيد: sqlite3 يفتح الاتصال من أي خيط
+        # فلا ينكشف الخطأ حتى ينافس خيطان على عبارة واحدة.
+        # والمخزن يُستدعى كله من خيط الواجهة اليوم.
+        self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
-        # WAL Journal دوام أوسع للقراءة مع الكتابة، وهو ما تحتاجه
-        # قراءة الواجهة أثناء تسجيل المشغّل.
+        # WAL يسمح لقارئ مستقبَل أن يقرأ أثناء الكتابة.
+        # لا خيط ثانٍ اليوم، لكنه لا يكلّف شيئاً.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
@@ -167,7 +184,8 @@ class ContentStore:
 
     # ---------- اختيار المقطع التالي ----------
     def next_for_window(self, window_key: str) -> Optional[sqlite3.Row]:
-        """
+        (
+            """
         يختار المقطع التالي لنافذة واحدة.
 
         مساران، بحسب وجود sequence_index:
@@ -181,6 +199,7 @@ class ContentStore:
           الصلة الخارجية تحفظ من لم يُشغَّل أبداً، وترتيبه NULL يجعله
           أولاً في SQLite، فيُقدَّم جديد بلا سجل على قديم.
         """,
+        )
         sequenced = self._conn.execute(
             """
             SELECT c.* FROM audio_content c
@@ -299,3 +318,25 @@ class ContentStore:
                 "FROM playback_log GROUP BY audio_id ORDER BY audio_id"
             )
         ]
+
+    # ---------- صيانة السجل ----------
+    def prune_older_than(self, days: int, today: Optional[str] = None) -> int:
+        """
+        يحذف ما قبل تاريخ من سجل التشغيل، ويعيد عدد الصفوف المحذوفة.
+
+        **غير مربوط تلقائياً.** حذف تاريخ المستخدم قرارُه، لا قرارُ
+        الشيفرة: من يعمل تسعين يوماً يظنّ أن السجل يبقى، فمن
+        ينادي هذا عند الإقلاع يفقد ذلك بلا إذن. الاتصال متاح لمن
+        يريد، والقرار منفصل.
+
+        `today` يحقن لأجل الفحص: «قبل كذا» يُقاس بتاريخ الجهاز لو لم
+        يُمرَّر، فلا يمكن تثبيت سلوك الفحص.
+        """
+        if days <= 0:
+            return 0
+        cutoff = (datetime.fromisoformat(today) - timedelta(days=days)).date()
+        cur = self._conn.execute(
+            "DELETE FROM playback_log WHERE started_at < ?", (cutoff.isoformat(),)
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
