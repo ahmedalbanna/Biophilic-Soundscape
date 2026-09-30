@@ -29,14 +29,16 @@ python tests/test_content_engine.py     #  84 - آلة حالات السرد
 python tests/test_content_gate.py       #  52 - تكامل البوابة بالأولويات
 python tests/test_content_player.py     #  46 - المشغّل الحقيقي وحارس music_claimed
 python tests/test_content_settings.py   #  41 - تنقية مفاتيح المحتوى
-python tests/test_content_panel.py      #  40 - لوحة المحتوى في الواجهة
+python tests/test_content_pcm.py        #  34 - توصيل PCM بالميكروفون
+python tests/test_content_panel.py      #  42 - لوحة المحتوى في الواجهة
+python tests/test_simulate.py           #  25 - سيناريوهات المحاكاة 7 و8
 python tests/test_desktop.py            # 245 - الأصول/المشغل/VAD/الصلاة/الإعدادات/الواجهة
 python -m src.context_aware_audio.simulate
 ```
 
 الاختبارات نصوص تُشغَّل مباشرة (ليست pytest) — عمداً: بلا اعتماديات.
-كلsuite بلا `sleep` إلا `test_content_panel.py`: مسار الواجهة يقرأ
-ساعة الحائط لا طابعاً محقوقاً، فانتظاره فيها حقيقي بالضرورة.
+لا `sleep` فيها إلا `test_content_panel.py`: مسار الواجهة يقرأ ساعة
+الحائط لا طابعاً محقوقاً، فانتظاره فيها حقيقي بالضرورة.
 
 كل اختبار ينشئ التطبيق ويحفظ يجب أن يغلّف `settings.writable_path`
 بمجلد مؤقت. الملف الحقيقي مُتجاهَل في git، فالكتابة إليه لا تظهر في

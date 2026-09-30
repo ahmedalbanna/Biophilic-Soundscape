@@ -29,11 +29,13 @@ python tests/test_content_engine.py             #  84 - narration state machine
 python tests/test_content_gate.py               #  52 - gate + priority integration
 python tests/test_content_player.py             #  46 - pygame.music + music_claimed
 python tests/test_content_settings.py           #  41 - settings coercion
+python tests/test_content_pcm.py                #  34 - read_pcm + the tick gate
 python tests/test_content_panel.py              #  42 - the Tk panel (real time)
+python tests/test_simulate.py                   #  25 - scenarios 7 and 8
 python tests/test_desktop.py                    # 245 checks - assets/player/VAD/prayer/UI
 ```
 
-Before declaring work done: `py_compile` all modules, `pyflakes`, all nine
+Before declaring work done: `py_compile` all modules, `pyflakes`, all eleven
 test files, and a UI smoke test. `simulate.py` is the fastest way to see a
 decision change take effect.
 
@@ -137,6 +139,16 @@ Conventions that matter:
   the file — a crash reads like a pass in a probe.
 - `test_content_player.py` needs real pygame. The `music_claimed` guard and
   the `set_pos` order only appear against a real mixer; do not fake it.
+- A crash is not a failing check. `list.index(x)` on a missing value,
+  `dict[k]` on a missing key, and an assertion on a length both end the
+  file, and a probe reads that as inconclusive. Guard membership first
+  and let the check fail cleanly.
+- Assert the invariant, not the symptom. "stop clears the block" passed
+  with the clearing removed, because the `_stream` guard already returned
+  nothing. Read the field when the invariant is about the field.
+- When a test spies on two functions and one calls the other, the spy
+  sees both. `analyze_pcm` calls `analyze_frame` internally; recording
+  both made the gate look as if it had chosen `analyze_frame`.
 - Cover every new code path, and reproduce each bug before fixing it. Three
   rounds of review review found bugs that the green suite could not see
   because the happy path was the only path tested. A test that cannot fail
