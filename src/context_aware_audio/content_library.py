@@ -44,17 +44,28 @@ class ScanReport:
     root: Path
     added: int = 0
     updated: int = 0
+    # ما رُئي لا ما تغيّر. الملف بلا تغيير يُعدّ seen ولا يُعدّ updated،
+    # فلا يتغيّر شيء في الفحص الثاني ويبقى added=updated=0 — وكان total
+    # صفراً فيُقال «المجلد فارغ» عن مكتبة فيها مقطعان. الفحص يُنظر
+    # إليه لعرض ما في المجلد، لا ليُحصي ما تحرّك.
+    seen: int = 0
     skipped: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
+        """عدد المقاطع المرئية، لا عدد المتغيّر منها."""
+        return self.seen
+
+    @property
+    def changed(self) -> int:
         return self.added + self.updated
 
     @property
     def is_empty(self) -> bool:
         """مكتبة فارغة حالة صريحة لا صمت: الواجهة تعرضها كما هي."""
-        return self.total == 0 and not self.errors
+        return self.seen == 0 and not self.errors
+
 
 
 def content_id_for(relative_path: str) -> str:
@@ -196,6 +207,7 @@ class ContentLibrary:
             self._upsert(path, rel, cid, keys, duration)
             report.added += 1 if existing is None else 0
             report.updated += 1 if existing is not None else 0
+        report.seen = seen
         if seen == 0:
             report.skipped.append("(المجلد فارغ)")
         return report

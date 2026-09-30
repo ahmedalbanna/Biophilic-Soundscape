@@ -208,6 +208,20 @@ class AudioService:
         self.content_library = ContentLibrary(
             self.content_library_path, self.content_store, self.config
         )
+        # الفحص عند الإقلاع: بلاه تظهر المكتبة فارغة على تثبيت جديد
+        # حتى يضغط المستخدم «إعادة فحص». القياس مُخزَّن ببصمة
+        # (زمن تعديل + حجم) فالفحص الثاني statٌ لا قياس.
+        try:
+            report = self.content_library.scan()
+            if report.total:
+                self.log(
+                    f"مكتبة المحتوى: {report.total} مقطع "
+                    f"({report.added} جديد، {report.updated} محدَّث)"
+                )
+            elif report.is_empty:
+                self.log(f"مكتبة المحتوى فارغة: {self.content_library_path}")
+        except Exception as exc:
+            self._set_content_error(f"تعذّر فحص المكتبة: {exc}")
         try:
             self.content_player = RealContentPlayer(
                 self.content_library_path, background=self.player
@@ -225,11 +239,37 @@ class AudioService:
         return self.content_library is not None and self.content is not None
 
     def _content_window_now(self) -> str:
-        period = self.engine.calendar.period_for_datetime(self.clock.now())
+        """
+        النافذة المقابلة لساعة هذه اللحظة.
+
+        من `self._now` التي تضعها النبضة، لا من `clock.now()` مباشرة.
+        مصدران للوقت في هذه الخدمة: ساعة الطلب قد تكون مزيفة (محاكاة،
+        أو حقن في فحص)، والمحرّك يقرّر الفترة من الذي في `tick`. فلو
+        بحثت النافذة عن ساعةٍ أخرى لأمكن أن يفكّر المحتوى في مقيل
+        بينما المحرك يقرّر ضحى.
+        """
+        period = self.engine.calendar.period_for_datetime(self._now())
         for key, spec in self.config.content_windows.items():
             if period in spec["periods"]:
                 return key
         return ""
+
+    def _now(self) -> datetime:
+        """ساعة آخر نبضة، أو ساعة الساعة إن لم تنبض بعد."""
+        stamp = getattr(self, "_last_now", None)
+        return stamp if stamp is not None else self.clock.now()
+
+    def _real_now(self) -> datetime:
+        """
+        طابع الزمن الحقيقي كما تمرّره النبضة.
+
+        السيناريو يزرع إطاراً بطابع زمني، والمحرّك يقارن طوابعه
+        بطوابع الإطارات. فلو زرع السيناريو من `clock.real_now()` و
+        النبضة محقونة بطابع آخر، صارت المدة بين الإطارين سالبة أو
+        هائلة: تهدئة النقاش لا تنتهي أبداً. فالطابعان من مصدر واحد.
+        """
+        stamp = getattr(self, "_last_real_now", None)
+        return stamp if stamp is not None else self.clock.real_now()
 
     def _content_tick(self, cmd):
         """
@@ -270,7 +310,7 @@ class AudioService:
         clip = self.content_store.next_for_window(self._content_window_now())
         if clip is None:
             return self.log("تشغيل فوري: لا مقطع في النافذة الحالية")
-        if self.content.request_now(clip, self.clock.now()):
+        if self.content.request_now(clip, self._now()):
             return self.log(f"تشغيل فوري: {clip['title']}")
         return self.log("تشغيل فوري: تعذّر البدء")
 
@@ -639,8 +679,8 @@ class AudioService:
         db, speech, greeting, hold, label = SCENARIOS[kind]
         self._scenario_until = 0.0
         self._scenario_db_value = 0.0
-        now = self.clock.now()
-        frame = self.vad.analyze_frame(db, timestamp=self.clock.real_now().timestamp())
+        now = self._now()
+        frame = self.vad.analyze_frame(db, timestamp=self._real_now().timestamp())
         frame.is_speech = speech
         frame.is_overlapping = greeting and speech
         if greeting:
@@ -818,6 +858,8 @@ class AudioService:
             self._drain_prayer_queue()
             now = now or self.clock.now()
             real_now = real_now or self.clock.real_now()
+            self._last_now = now
+            self._last_real_now = real_now
             if self._prayer_date is not None and real_now.date() != self._prayer_date:
                 self._prayer_date = None
                 self._athan_played.clear()
