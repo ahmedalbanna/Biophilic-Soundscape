@@ -12,6 +12,7 @@ content_sync.py - سحب المحتوى التعليمي من الخادم ال�
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import tempfile
@@ -25,9 +26,21 @@ from typing import Callable, Dict, List, Optional
 # ملف الحالة بجانب المحتوى: يربط كل اسم ببصمته آخر مرة نُزّل فيها.
 STATE_FILENAME = ".content-sync-state.json"
 
-# رمز التحقق من المحاولة الأولى: نسخة قديمة تالفة تعيد التنزيل
-# بلا أن نترك المستخدم بلا محتوى.
-MIN_SYNC_INTERVAL_SEC = 300.0
+# السقف المطلق لردّ الخادم. `part["bytes"]` يحدّ ما نتوقّعه، والخادم
+# قد يرسل أكثر: بلا سقف يملأ قرص المستخدم إلى أن يمتلئ. القيمة
+# أرفع من أي مقطع تعليمي معقول، وتبقى حدّاً ضدّ خادم معطوب.
+MAX_BYTES_PER_FILE = 512 * 1024 * 1024
+MAX_BYTES_MANIFEST = 8 * 1024 * 1024
+
+# استثناءات الشبكة التي يجب ألا تُسقط بقية النافذة. IncompleteRead
+# وHTTPException ليستا من URLError ولا من OSError، فاستثناء واحد ناقص
+# كان يوقف السحب عند أول استجابة مقطوعة بدل أن يحسبها فشلاً واحداً.
+NET_ERRORS = (
+    urllib.error.URLError,
+    OSError,
+    http.client.HTTPException,
+    ValueError,
+)
 
 
 @dataclass
@@ -38,6 +51,7 @@ class SyncResult:
     total: int = 0
     transferred: int = 0
     failed: int = 0
+    rejected: int = 0
     verified: int = 0
     skipped: int = 0
     errors: List[str] = field(default_factory=list)
@@ -46,6 +60,42 @@ class SyncResult:
     @property
     def ok(self) -> bool:
         return self.failed == 0 and not self.cancelled
+
+
+def safe_name(name: object) -> Optional[str]:
+    """
+    يعيد الاسم إن كان اسم ملفّاً آمناً، وإلا None.
+
+    `filename` يأتي من خادم على HTTP صريح، فأي متناصق على الطريق
+    يستطيع كتابته. القاعدة: اسمٌ مجرّد، بلا فواصل، بلا محرّك، وبلا
+    نقطتين ولا نقطة. أي شيء آخر يُرفض قبل أن يُلمس القرص.
+
+    كان `library_dir / name` بلا فحص: `../../x.bat` يكتب فوق قائمة
+    بدء ويندوز، وقد جرّب ذلك فكتب ملفين فوق مجلد المكتبة وأبلغ
+    عن نجاح النقل.
+    """
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or name in (".", ".."):
+        return None
+    # مجرّد: بلا فاصل ولا محرّك. Path(name).name == name يغطّي
+    # الفواصل على ويندوز وبوسكس معاً.
+    if Path(name).name != name:
+        return None
+    if "/" in name or "\\" in name or ":" in name:
+        return None
+    if name.startswith("~"):
+        return None
+    return name
+
+
+def _within(child: Path, parent: Path) -> bool:
+    """هل `child` داخل `parent` بعد حلّ الروابط؟ حزام ثانٍ لا يكلّف."""
+    try:
+        return child.resolve().is_relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -77,14 +127,51 @@ def list_windows(base: str, token: str, timeout: float = 15.0) -> List[dict]:
         url += "?" + urllib.parse.urlencode({"token": token})
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
+            raw = resp.read(MAX_BYTES_MANIFEST + 1)
+            if len(raw) > MAX_BYTES_MANIFEST:
+                return []
+            data = json.loads(raw.decode("utf-8"))
+    except NET_ERRORS:
         return []
     windows = data.get("windows") if isinstance(data, dict) else None
     return windows if isinstance(windows, list) else []
 
 
-def _download(url: str, dest: Path, timeout: float) -> int:
+def list_windows_why(base: str, token: str, timeout: float = 15.0) -> tuple[List[dict], str]:
+    """
+    الفهرس مع سبب الفشل.
+
+    فهرس `/` اختياري: خادمٌ بلا `/` يبقى صالحاً للمزامنة. لكن الفهرس
+    *و* الـmanifest معطّلان معناه «لا خادم»، والفرق بينهما يظهر
+    لللمستخدم عند الفشل لا في السجل.
+    """
+    root = base.rstrip("/")
+    url = root + "/"
+    if token:
+        url += "?" + urllib.parse.urlencode({"token": token})
+    global timeout_hint
+    timeout_hint = f"{timeout:.0f}ث"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            raw = resp.read(MAX_BYTES_MANIFEST + 1)
+            if len(raw) > MAX_BYTES_MANIFEST:
+                return [], "فهرس الخادم أكبر من السقف"
+            data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        return [], _why(exc)
+    windows = data.get("windows") if isinstance(data, dict) else None
+    if not isinstance(windows, list):
+        return [], "فهرس الخادم لا يحمل قائمة نوافذ"
+    return windows, ""
+
+
+class _TooLarge(Exception):
+    """تجاوز الردّ الحجم المتوقّع."""
+
+
+def _download(
+    url: str, dest: Path, timeout: float, max_bytes: int = 0
+) -> int:
     """
     ينزّل ملفاً إلى مساره النهائي عبر ملف مؤقت ثم `os.replace`.
 
@@ -101,11 +188,22 @@ def _download(url: str, dest: Path, timeout: float) -> int:
             delete=False,
         ) as tmp:
             tmp_name = tmp.name
+            ceiling = max_bytes or MAX_BYTES_PER_FILE
+            if max_bytes:
+                ceiling = min(ceiling, MAX_BYTES_PER_FILE)
+            written = 0
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 while True:
                     chunk = resp.read(262_144)
                     if not chunk:
                         break
+                    written += len(chunk)
+                    if written > ceiling:
+                        # نرمي قبل الكتابة الزائدة: الملف المؤقت
+                        # يُحذف في التحت، فلا يبقى ناقصٌ باسمه.
+                        raise _TooLarge(
+                            f"{dest.name}: {written} بايت بعد سقف {ceiling}"
+                        )
                     tmp.write(chunk)
         os.replace(tmp_name, dest)
         return dest.stat().st_size
@@ -139,9 +237,11 @@ def sync_window(
     library_dir = Path(library_dir)
     state_path = library_dir / STATE_FILENAME
 
-    manifest = _read_json_url(manifest_url(base_url, window, token), timeout)
+    manifest, why = _read_json_url(
+        manifest_url(base_url, window, token), timeout
+    )
     if manifest is None:
-        result.errors.append("تعذّر جلب قائمة المحتوى")
+        result.errors.append(f"تعذّر جلب قائمة المحتوى: {why}")
         result.failed = 1
         return result
 
@@ -157,7 +257,7 @@ def sync_window(
         known = {}
 
     library_dir.mkdir(parents=True, exist_ok=True)
-    transferred = verified = 0
+    transferred = verified = rejected = 0
     new_state: Dict[str, dict] = {}
 
     for index, part in enumerate(parts, start=1):
@@ -168,13 +268,27 @@ def sync_window(
             break
         if not isinstance(part, dict):
             continue
-        name = part.get("filename")
+        raw_name = part.get("filename")
         want_hash = part.get("sha256")
-        if not name or not want_hash:
+        name = safe_name(raw_name)
+        if name is None:
+            rejected += 1
+            if len(result.errors) < 5 and raw_name is not None:
+                result.errors.append(f"اسم ملف غير مقبول: {raw_name!r}")
+            continue
+        if not want_hash:
             continue
 
         dest = library_dir / name
+        # حزام ثانٍ بعد مسمّى آمن: المسار المحسوب يجب أن يبقى داخل
+        # المكتبة حتى لو تغيّرت قواعد التسمية غداً.
+        if not _within(dest, library_dir):
+            rejected += 1
+            if len(result.errors) < 5:
+                result.errors.append(f"المسار خارج المكتبة: {name}")
+            continue
         prev = known.get(name)
+        existed_before = dest.exists()
         up_to_date = False
         if prev and prev.get("sha256") == want_hash:
             # الحجم أولاً: أرخص من البصمة ويكشف القطع والتلف الشائع.
@@ -191,14 +305,25 @@ def sync_window(
                 on_progress(index, result.total)
             continue
 
+        # safe="" يقفل ممرّ '/'، فلا يصير اسماً متشعّباً في الرابط.
+        # الاسم مُتحقَّق منه آنفاً، فهذه طبقة ثالثة لا أولى.
         url = f"{base_url.rstrip('/')}/{urllib.parse.quote(window)}/" \
-              f"{urllib.parse.quote(name)}"
+              f"{urllib.parse.quote(name, safe='')}"
         if token:
             url += "?" + urllib.parse.urlencode({"token": token})
 
+        # السقف يأتي من الـmanifest نفسه، فخادمٌ يكذب في الحجم يحدّ
+        # نفسه - لكن السقف المطلق أدناه لا يعتمد على أحد.
+        expect = part.get("bytes")
+        expect = expect if isinstance(expect, int) and expect > 0 else 0
         try:
-            _download(url, dest, timeout)
-        except (urllib.error.URLError, OSError) as exc:
+            _download(url, dest, timeout, max_bytes=expect)
+        except _TooLarge:
+            result.failed += 1
+            if len(result.errors) < 5:
+                result.errors.append(f"{name}: تجاوز الحجم المتوقّع")
+            continue
+        except NET_ERRORS as exc:
             result.failed += 1
             if len(result.errors) < 5:
                 result.errors.append(f"{name}: {exc}")
@@ -207,10 +332,15 @@ def sync_window(
         # التحقق من ما وصل فعلاً، لا مما طُلب.
         if _sha256(dest) != want_hash:
             result.failed += 1
-            try:
-                dest.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # لا نحذف إلا ما أنشأناه في هذه المحاولة. الملف المحلي
+            # الذي كان هنا قبل التنزيل نبقيه: البصمة غير المطابقة قد
+            # تكون استجابة مقطوعة، والملف الجيد أبقى من ملف ناقص،
+            # ولا القاعدة أن تحذف ما لم تمسّه.
+            if not existed_before:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if len(result.errors) < 5:
                 result.errors.append(f"{name}: بصمة غير مطابقة")
             continue
@@ -228,15 +358,59 @@ def sync_window(
 
     result.transferred = transferred
     result.verified = verified
+    result.rejected = rejected
     return result
 
 
-def _read_json_url(url: str, timeout: float) -> Optional[dict]:
+timeout_hint = ""
+
+
+def _why(exc: Exception) -> str:
+    """
+    سبب الجواب بلغة المستخدم، لا اسم الاستثناء.
+
+    كان الفشل كلّه يصير `None` ثم «تعذّر جلب قائمة المحتوى». ف 점에서
+    ميت، ونقطة.token خطأ، وانتهاء مهلة، ونصّ تالف — أربعة أخطاء
+   /message واحد، ولا سبيل يعرف المستخدم أيّها. والشاشة هي كل ما
+    لديه.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return f"الخادم رفض الرمز ({exc.code}) - تحقّق من الرمز"
+        if exc.code == 404:
+            return "لا توجد قائمة بهذه النافذة على الخادم (404)"
+        return f"الخادم أجاب {exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason):
+            return f"انتهت المهلة ({timeout_hint}) - الخادم لا يستجيب"
+        return f"تعذّر الوصول إلى الخادم: {reason}"
+    if isinstance(exc, TimeoutError):
+        return "انتهت المهلة - الخادم لا يستجيب"
+    if isinstance(exc, ValueError):
+        return "ردّ الخادم ليس JSON صالحاً"
+    if isinstance(exc, OSError):
+        return f"خطأ في الشبكة أو القرص: {exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _read_json_url(url: str, timeout: float) -> tuple[Optional[dict], str]:
+    """
+    يجلب JSON ويعيد (البيانات أو None، سبب الفشل أو نص فارغ).
+
+    سببين بدل واحد: الفحص يريد أن يعرف أن الفشل jaringanُ لاwesnıl
+    json تالف، والمستخدم يريد أن يرى أيّهما.
+    """
+    global timeout_hint
+    timeout_hint = f"{timeout:.0f}ث"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
+            raw = resp.read(MAX_BYTES_MANIFEST + 1)
+            if len(raw) > MAX_BYTES_MANIFEST:
+                return None, "قائمة المحتوى أكبر من السقف المسموح"
+            return json.loads(raw.decode("utf-8")), ""
+    except Exception as exc:
+        return None, _why(exc)
 
 
 def _sha256(path: Path) -> str:

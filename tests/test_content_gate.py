@@ -26,6 +26,25 @@ from src.context_aware_audio.content_engine import ContentEngine, ContentState
 from src.context_aware_audio.content_library import ContentLibrary
 from src.context_aware_audio.content_store import ContentStore
 
+
+# ===== إصلاح: المواقيت مثبّتة، والتعليق القديم كان يصف غير الموجود =====
+# التعليق القديم يقول «17:20 يقع داخل نافذة المغرب (كتم 17:07 →
+# قفل 17:45) بالأوقات الافتراضية». والأوقات الافتراضية في
+# prayer_engine هي المغرب 18:10 لا 17:10، فـ17:10 يقع في فجوة: قفل
+# العenasr ينتهي 16:05، وكتم المغرب يبدأ 18:07. لا كتم هناك، وكان
+# المحرك مُحقّاً والفشل من توقّع كُتب على غير الواقع.
+#
+# والحقيقة الثانية في القسم 5 تحتاج 19:00 مكتومة. فمخطّط واحد
+# يغطيهما: المغرب 17:10 يغطّي 17:20، والعشاء 18:55 يغطّي 19:00.
+# والعصر 15:25 لا يغطّي 15:00 الذي يستعمله قسم النافذة.
+FIXED_PRAYER_TIMES = {
+    "fajr": dtime(4, 40),
+    "dhuhr": dtime(12, 5),
+    "asr": dtime(15, 25),
+    "maghrib": dtime(17, 10),
+    "isha": dtime(18, 55),
+}
+
 PASSED = FAILED = 0
 STEP = 0.2
 
@@ -56,7 +75,15 @@ def wav(path, seconds, rate=8000):
 
 
 def build(window="duha_wisdom", name="wisdom", seconds=60.0):
-    """محرك خلفية فيه محرك محتوى بمخزن حقيقي ومقطع واحد."""
+    """
+    محرك خلفية فيه محرك محتوى بمخزن حقيقي ومقطع واحد.
+
+    المواقيت مثبّتة هنا. لم تكن: الفحص يدّعي أن المغرب عند 18:10
+    يُكتم، والآلة تقرأ الآن من كاش Aladhan الحقيقي. حين كان المغرب
+    المؤقت 18:10 مرّ الفحص؛ وحين صار 18:15 صار 18:10 قبل نافذة
+    الكتم بدقيقتين، فسقط. أي أن الفحص كان يمرّ بتوفيق الساعة لا
+    بصحّة ما يفحص. مثبّتٌ ينفّذ ما يقوله.
+    """
     tmp = Path(tempfile.mkdtemp())
     lib = tmp / "lib"
     wav(lib / f"{window}__001__{name}.wav", seconds)
@@ -64,6 +91,7 @@ def build(window="duha_wisdom", name="wisdom", seconds=60.0):
     store = ContentStore(tmp / "c.db")
     ContentLibrary(lib, store, cfg).scan()
     engine = ContextAwareAudioEngine(cfg)
+    engine.prayer.set_times(dict(FIXED_PRAYER_TIMES))
     engine.content = ContentEngine(cfg, store)
     return tmp, engine, store, cfg
 
@@ -169,32 +197,53 @@ cfg_off.content_enabled = False
 clock = new_clock()
 _, _, _ = step(eng_off, clock, 1.0, db=50.0, speech=True)
 duck_cmd, _, _ = step(eng_off, clock, 2.0, db=50.0, speech=True)
-check("replace: with the content off the ducking branch is active",
-      duck_cmd.state == EngineState.DUCKED, duck_cmd.state.value)
+check(
+    "replace: with the content off the ducking branch is active",
+    duck_cmd.state == EngineState.DUCKED,
+    duck_cmd.state.value,
+)
 duck_ratio = duck_cmd.volume_ratio
-check("replace: the duck curve is not the ambient floor",
-      abs(duck_ratio - cfg_off.content_ambient_ratio) > 1e-6, duck_ratio)
-check("replace: a product would have been near silence",
-      duck_ratio * cfg_off.content_ambient_ratio < 0.1,
-      duck_ratio * cfg_off.content_ambient_ratio)
+check(
+    "replace: the duck curve is not the ambient floor",
+    abs(duck_ratio - cfg_off.content_ambient_ratio) > 1e-6,
+    duck_ratio,
+)
+check(
+    "replace: a product would have been near silence",
+    duck_ratio * cfg_off.content_ambient_ratio < 0.1,
+    duck_ratio * cfg_off.content_ambient_ratio,
+)
 done(tmp_off, store_off)
 
 tmp, engine, store, cfg = build()
 clock = new_clock()
 step(engine, clock, 10.0)
-check("replace: the content is running before the talk",
-      engine.content.is_running is True, engine.content.state)
+check(
+    "replace: the content is running before the talk",
+    engine.content.is_running is True,
+    engine.content.state,
+)
 cmd, seen, at = step(engine, clock, 2.0, db=50.0, speech=True)
-check("replace: the ducking branch is still the background state",
-      cmd.state == EngineState.DUCKED, cmd.state.value)
-check("replace: with content the ratio is the ambient floor",
-      cmd.volume_ratio == cfg.content_ambient_ratio, cmd.volume_ratio)
-check("replace: the floor is NOT the product of the two",
-      abs(cmd.volume_ratio - duck_ratio * cfg.content_ambient_ratio) > 1e-6,
-      cmd.volume_ratio)
-check("replace: the ratio is the floor on the pause frame too",
-      at.get(ContentAction.PAUSE, cmd).volume_ratio == cfg.content_ambient_ratio,
-      at.get(ContentAction.PAUSE, cmd).volume_ratio)
+check(
+    "replace: the ducking branch is still the background state",
+    cmd.state == EngineState.DUCKED,
+    cmd.state.value,
+)
+check(
+    "replace: with content the ratio is the ambient floor",
+    cmd.volume_ratio == cfg.content_ambient_ratio,
+    cmd.volume_ratio,
+)
+check(
+    "replace: the floor is NOT the product of the two",
+    abs(cmd.volume_ratio - duck_ratio * cfg.content_ambient_ratio) > 1e-6,
+    cmd.volume_ratio,
+)
+check(
+    "replace: the ratio is the floor on the pause frame too",
+    at.get(ContentAction.PAUSE, cmd).volume_ratio == cfg.content_ambient_ratio,
+    at.get(ContentAction.PAUSE, cmd).volume_ratio,
+)
 done(tmp, store)
 
 # ===== 3) الصلاة تتجاوز المحتوى تماماً =====
@@ -202,13 +251,8 @@ tmp, engine, store, cfg = build()
 clock = new_clock()
 step(engine, clock, 13.0)
 check("prayer: content is running first", engine.content.is_running is True)
-# ندخل نافذة الصلاة. الوقت 17:20 يقع داخل نافذة المغرب
-# (كتم 17:07 → قفل 17:45 بالأوقات الافتراضية).
-#
-# كان 18:10، وهو الوقت بين النافذتين: قفل المغرب 17:45 ينتهي،
-# وكتم العشاء يبدأ 18:27. لا كتم هناك، فكان المحرك مُحقّاً
-# والفشل من التوقّع لا من المنطق. أي أن «18:10» ليس خطأ في
-# الفهم - وقد يُقرأ خطأً.
+# ندخل نافذة الصلاة. 17:20 داخل نافذة المغرب المثبّتة في
+# FIXED_PRAYER_TIMES (كتم 17:07 ← قفل 17:45).
 cmd, seen, at = step(engine, clock, 1.0, now=datetime(2026, 9, 30, 17, 20, 0))
 check(
     "prayer: the background is muted",
@@ -221,8 +265,8 @@ check(
     seen,
 )
 check(
-# سبب الإيقاف يُمرَّر من فرع الصلاة نفسه فيتكرر فيطرفين. المهم
-# أن السطرين انضما، أي أن المشغّل عرف أنه يجب أن يوقف.
+    # سبب الإيقاف يُمرَّر من فرع الصلاة نفسه فيتكرر فيطرفين. المهم
+    # أن السطرين انضما، أي أن المشغّل عرف أنه يجب أن يوقف.
     "prayer: the stop reaches the command",
     " | " in at.get(ContentAction.STOP, cmd).reason,
     at.get(ContentAction.STOP, cmd).reason,
@@ -414,8 +458,12 @@ done(tmp, store)
 tmp, engine, store, cfg = build()
 clock = new_clock()
 step(engine, clock, 10.0)
-check("ceiling: the content is running before we raise the voice",
-      engine.content.is_running is True, engine.content.state)
+check(
+    "ceiling: the content is running before we raise the voice",
+    engine.content.is_running is True,
+    engine.content.state,
+)
+
 
 # نقطة مرجعية: كلام هادئ، المنحنى فوق السقف
 def ratio_at(db, frames=6):
@@ -452,15 +500,21 @@ check(
 
 # النقطة الحاسمة: كلام عالٍ جداً
 high = ratio_at(64.9)
-check("ceiling: the applied ratio never exceeds the floor",
-      high.volume_ratio <= cfg.content_ambient_ratio + 1e-9,
-      f"{high.volume_ratio:.3f} > {cfg.content_ambient_ratio}")
-check("ceiling: and it is the duck curve, not the floor",
-      high.volume_ratio < cfg.content_ambient_ratio - 0.01,
-      f"{high.volume_ratio:.3f}")
-check("ceiling: the deep duck is still reachable with content on",
-      high.volume_ratio < engine.duck_min_ratio() + 0.02,
-      f"{high.volume_ratio:.3f} مقابل أدنى {engine.duck_min_ratio():.3f}")
+check(
+    "ceiling: the applied ratio never exceeds the floor",
+    high.volume_ratio <= cfg.content_ambient_ratio + 1e-9,
+    f"{high.volume_ratio:.3f} > {cfg.content_ambient_ratio}",
+)
+check(
+    "ceiling: and it is the duck curve, not the floor",
+    high.volume_ratio < cfg.content_ambient_ratio - 0.01,
+    f"{high.volume_ratio:.3f}",
+)
+check(
+    "ceiling: the deep duck is still reachable with content on",
+    high.volume_ratio < engine.duck_min_ratio() + 0.02,
+    f"{high.volume_ratio:.3f} مقابل أدنى {engine.duck_min_ratio():.3f}",
+)
 
 # ما يكتبه السجل يجب أن يصف ما استُعمل
 import re as _re
@@ -468,9 +522,11 @@ import re as _re
 _m = _re.search(r"خفض\s*(\d+)%", high.reason)
 _claimed = int(_m.group(1)) if _m else -1
 _applied_cut = round((1.0 - high.volume_ratio) * 100)
-check("ceiling: the log states the reduction that was applied",
-      _claimed == _applied_cut,
-      f"السجل يقول {_claimed}% والاستُعمل {_applied_cut}%")
+check(
+    "ceiling: the log states the reduction that was applied",
+    _claimed == _applied_cut,
+    f"السجل يقول {_claimed}% والاستُعمل {_applied_cut}%",
+)
 done(tmp, store)
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")

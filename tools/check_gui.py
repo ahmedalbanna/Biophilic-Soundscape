@@ -9,7 +9,6 @@
     xvfb-run -a python tools/check_gui.py
 """
 
-import json
 import os
 import sys
 import tempfile

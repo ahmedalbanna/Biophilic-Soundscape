@@ -1,5 +1,5 @@
 """
-فحص التمرير: هل المحتوى الص��لي يُمرَّر فعلاً؟
+فحص التمرير: هل المحتوى الإضافي يُمرَّر فعلاً، وهل يبقى بعد الإيقاف؟
 
 القياس قبل التغيير: المحتوى يطلب نحو 1400 بكسل والنافذة 960، فكان
 440 بكسل خارج الشاشة بلا وسيلة. الفحص يبني الواجهة، يمرّر بعجلة
@@ -9,6 +9,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,14 +40,14 @@ def main() -> int:
     check("a scrollbar was created", getattr(ui, "_scrollbar", None) is not None)
 
     # --- geometry ------------------------------------------------------
-    top = int(canvas.winfo_rooty())
     h = root.winfo_height()
     content = int(canvas.bbox("all")[3]) if canvas.bbox("all") else 0
     print(f"    window h={h}  content h={content}  overflow={content - h}")
     check("content is taller than the window", content > h, f"{content} > {h}")
     region = canvas.cget("scrollregion")
-    check("the scrollregion spans the content", content > 0 and bool(region),
-          str(region))
+    check(
+        "the scrollregion spans the content", content > 0 and bool(region), str(region)
+    )
 
     # --- the wheel actually scrolls ------------------------------------
     # Tk لا يسمح ببناء Event بالمعاملات، فيُرفع الحدث الحقيقي عبر
@@ -68,8 +69,11 @@ def main() -> int:
     for _ in range(8):
         wheel(-120)
     bottom = canvas.yview()[0]
-    check("scrolling reaches the last panel", bottom >= max_pos - 0.01,
-          f"yview={bottom:.3f} max={max_pos:.3f}")
+    check(
+        "scrolling reaches the last panel",
+        bottom >= max_pos - 0.01,
+        f"yview={bottom:.3f} max={max_pos:.3f}",
+    )
 
     # --- and back to the top -------------------------------------------
     for _ in range(8):
@@ -90,14 +94,60 @@ def main() -> int:
     inner_w = canvas.itemcget(canvas.find_all()[0], "width")
     canvas_w = canvas.winfo_width()
     print(f"    canvas w={canvas_w}  inner w={inner_w}")
-    check("the inner frame follows the canvas width",
-          inner_w == "" or int(inner_w) == canvas_w or abs(int(inner_w) - canvas_w) <= 1,
-          f"{inner_w} vs {canvas_w}")
+    check(
+        "the inner frame follows the canvas width",
+        inner_w == "" or int(inner_w) == canvas_w or abs(int(inner_w) - canvas_w) <= 1,
+        f"{inner_w} vs {canvas_w}",
+    )
 
-    # --- stop() releases the global binding ----------------------------
+    # --- the wheel still works after stop() ----------------------------
+    # The old gate here was `getattr(ui, "_wheel_binding", None) is not
+    # None`, which is true before and after stop() - it certified
+    # nothing. The bug was that stop() unbound the wheel, so the gate
+    # has to fire an event and watch the view.
     ui.stop()
     root.update_idletasks()
-    check("stop() unbinds the wheel", getattr(ui, "_wheel_binding", None) is not None)
+    check(
+        "stop() no longer unbinds the wheel",
+        getattr(ui, "_wheel_binding", None) is None,
+    )
+
+    root.geometry("420x220")
+    root.update()
+    canvas.yview_moveto(0.0)
+    root.update_idletasks()
+    before = float(canvas.yview()[0])
+    canvas.yview_moveto(0.7)
+    root.update_idletasks()
+    mid = float(canvas.yview()[0])
+    for _ in range(10):
+        root.event_generate("<MouseWheel>", delta=120, x=200, y=120)
+        root.update()
+        time.sleep(0.01)
+    after = float(canvas.yview()[0])
+    check(
+        "the wheel still scrolls after stop()",
+        after < mid - 1e-6,
+        f"{mid:.4f} -> {after:.4f} (من {before:.4f})",
+    )
+
+    ui.start()
+    for _ in range(3):
+        root.update()
+        time.sleep(0.05)
+    canvas.yview_moveto(0.7)
+    root.update_idletasks()
+    mid2 = float(canvas.yview()[0])
+    for _ in range(10):
+        root.event_generate("<MouseWheel>", delta=120, x=200, y=120)
+        root.update()
+        time.sleep(0.01)
+    after2 = float(canvas.yview()[0])
+    check(
+        "the wheel still scrolls after stop() then start()",
+        after2 < mid2 - 1e-6,
+        f"{mid2:.4f} -> {after2:.4f}",
+    )
 
     root.destroy()
 

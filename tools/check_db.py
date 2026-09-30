@@ -156,7 +156,7 @@ def main() -> int:
 
         # ---- 5. a different window lands in its own rows --------------
         if window != "maqil_story":
-            r3 = sync_window(lib_dir, base, "maqil_story", token, max_parts=2)
+            sync_window(lib_dir, base, "maqil_story", token, max_parts=2)
             store3 = ContentStore(db_path)
             ContentLibrary(lib_dir, store3, EngineConfig()).scan()
             multi = sqlite3.connect(db_path).execute(

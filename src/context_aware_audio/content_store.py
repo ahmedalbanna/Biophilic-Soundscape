@@ -12,6 +12,7 @@ against ملف، وتُغلق، ولا تفترض وجود الصوت.
 """
 
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -76,22 +77,53 @@ class ContentStore:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # بلا check_same_thread=False: كان مفعّلاً بلا قفل.
-        # الإذن الصامت أخطر من القيد: sqlite3 يفتح الاتصال من أي خيط
-        # فلا ينكشف الخطأ حتى ينافس خيطان على عبارة واحدة.
-        # والمخزن يُستدعى كله من خيط الواجهة اليوم.
-        self._conn = sqlite3.connect(str(self.path))
+        # القفل لازم الآن لا لاحقاً. كان الاستدعاء كله في خيط واحد
+        # (واجهة Tk)، فبلا قفل كان الأمر مقبولاً. وواجهة HTTP تخدم كل
+        # طلب في خيطه: المخزن يُقرأ في state() من خيط طلب ويُكتب في
+        # الفحص من خيط آخر. بلا قفل يرمي sqlite3 «أُنشئ في خيط آخر»
+        # عند أول طلب — وهو ما حدث.
+        #
+        # RLock لا Lock: يُستدعى المخزن من داخل update() وهو محميّ
+        # أصلاً بقفل الخدمة، فقفلٌ عادي يجمّد على نفسه.
+        self._lock = threading.RLock()
+        self._closed = False
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # WAL يسمح لقارئ مستقبَل أن يقرأ أثناء الكتابة.
-        # لا خيط ثانٍ اليوم، لكنه لا يكلّف شيئاً.
+        # WAL يسمح لقارئ أن يقرأ أثناء الكتابة. لا خيط ثانٍ في
+        # التطبيق الواحد بعد استبدال Tk، لكنه لازم هنا: الطلبات
+        # تعمل كلّها في خيوط.
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # مهلة الانتظار: نبضة المحرّك والمكتبة والطلب يقرؤون القاعدة
+        # نفسها. مهلة بايثون الافتراضية خمس ثوانٍ قد لا تكفي في فحص
+        # 312 ملفاً، فيرمي أحدهم «مقفلة» وينتظر الآخر. عشرون تكفي.
+        self._conn.execute("PRAGMA busy_timeout=20000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
+    def _commit(self) -> None:
+        with self._lock:
+            if self._conn is not None and not self._closed:
+                self._conn.commit()
+
+    def _exec(self, sql: str, args: tuple = ()):
+        """تنفيذ مقفل. كل وصول للمخزن يمرّ من هنا."""
+        with self._lock:
+            if self._conn is None or self._closed:
+                raise sqlite3.ProgrammingError("المخزن مغلق")
+            return self._conn.execute(sql, args)
+
+
+    @property
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
+        with self._lock:
+            if self._conn is not None and not self._closed:
+                self._conn.close()
             self._conn = None
+            self._closed = True
 
     def __enter__(self) -> "ContentStore":
         return self
@@ -122,7 +154,7 @@ class ContentStore:
         القيمة تجعل «تغيّر المدة» أسبق من التحديث بلا داع.
         """
         stamp = added_at or datetime.now().isoformat(timespec="seconds")
-        self._conn.execute(
+        self._exec(
             """
             INSERT INTO audio_content (
               id, title, file_path, kind, window_key, sequence_index,
@@ -163,22 +195,22 @@ class ContentStore:
                 stamp,
             ),
         )
-        self._conn.commit()
+        self._commit()
 
     def all_content(self) -> List[sqlite3.Row]:
         return list(
-            self._conn.execute(
+            self._exec(
                 "SELECT * FROM audio_content WHERE enabled=1 ORDER BY id"
             )
         )
 
     def count(self) -> int:
         return int(
-            self._conn.execute("SELECT COUNT(*) FROM audio_content").fetchone()[0]
+            self._exec("SELECT COUNT(*) FROM audio_content").fetchone()[0]
         )
 
     def get(self, content_id: str) -> Optional[sqlite3.Row]:
-        return self._conn.execute(
+        return self._exec(
             "SELECT * FROM audio_content WHERE id=?", (content_id,)
         ).fetchone()
 
@@ -200,7 +232,7 @@ class ContentStore:
           أولاً في SQLite، فيُقدَّم جديد بلا سجل على قديم.
         """,
         )
-        sequenced = self._conn.execute(
+        sequenced = self._exec(
             """
             SELECT c.* FROM audio_content c
             WHERE c.enabled=1 AND c.window_key=?
@@ -216,7 +248,7 @@ class ContentStore:
         ).fetchone()
         if sequenced is not None:
             return sequenced
-        return self._conn.execute(
+        return self._exec(
             """
             SELECT c.* FROM audio_content c
             LEFT JOIN playback_log p ON p.audio_id = c.id
@@ -231,20 +263,20 @@ class ContentStore:
 
     # ---------- سجل التشغيل ----------
     def log_start(self, audio_id: str, window_key: str, started_at: str) -> int:
-        cur = self._conn.execute(
+        cur = self._exec(
             """
             INSERT INTO playback_log (audio_id, window_key, started_at, outcome)
             VALUES (?,?,?,?)
             """,
             (audio_id, window_key, started_at, OUTCOME_INTERRUPTED),
         )
-        self._conn.commit()
+        self._commit()
         return int(cur.lastrowid)
 
     def log_finish(
         self, log_id: int, outcome: str, position_sec: float, ended_at: str
     ) -> None:
-        self._conn.execute(
+        self._exec(
             """
             UPDATE playback_log
             SET outcome=?, position_sec=?, ended_at=?
@@ -252,7 +284,7 @@ class ContentStore:
             """,
             (outcome, position_sec, ended_at, log_id),
         )
-        self._conn.commit()
+        self._commit()
 
     def plays_today(
         self, window_key: str, day: str, exclude_outcome: Optional[str] = None
@@ -268,13 +300,13 @@ class ContentStore:
         وعدّاده كان يمنع النافذة بقية اليوم بلا سبب.
         """
         if exclude_outcome:
-            row = self._conn.execute(
+            row = self._exec(
                 "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
                 "AND started_at LIKE ? AND outcome IS NOT ?",
                 (window_key, f"{day}%", exclude_outcome),
             ).fetchone()
         else:
-            row = self._conn.execute(
+            row = self._exec(
                 "SELECT COUNT(*) FROM playback_log WHERE window_key=? "
                 "AND started_at LIKE ?",
                 (window_key, f"{day}%"),
@@ -293,13 +325,13 @@ class ContentStore:
         بعد أن انتهت الصلاة بلا سبب.
         """
         if exclude_outcome:
-            row = self._conn.execute(
+            row = self._exec(
                 "SELECT MAX(started_at) FROM playback_log "
                 "WHERE window_key=? AND outcome IS NOT ?",
                 (window_key, exclude_outcome),
             ).fetchone()
         else:
-            row = self._conn.execute(
+            row = self._exec(
                 "SELECT MAX(started_at) FROM playback_log WHERE window_key=?",
                 (window_key,),
             ).fetchone()
@@ -313,7 +345,7 @@ class ContentStore:
         """
         return [
             (row["audio_id"], int(row["plays"]), float(row["seconds"]))
-            for row in self._conn.execute(
+            for row in self._exec(
                 "SELECT audio_id, COUNT(*) AS plays, SUM(position_sec) AS seconds "
                 "FROM playback_log GROUP BY audio_id ORDER BY audio_id"
             )
@@ -335,8 +367,8 @@ class ContentStore:
         if days <= 0:
             return 0
         cutoff = (datetime.fromisoformat(today) - timedelta(days=days)).date()
-        cur = self._conn.execute(
+        cur = self._exec(
             "DELETE FROM playback_log WHERE started_at < ?", (cutoff.isoformat(),)
         )
-        self._conn.commit()
+        self._commit()
         return int(cur.rowcount)

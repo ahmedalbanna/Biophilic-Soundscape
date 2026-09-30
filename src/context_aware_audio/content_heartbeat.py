@@ -25,8 +25,11 @@ from src.context_aware_audio.config import EngineConfig  # noqa: E402
 from src.context_aware_audio.content_library import ContentLibrary  # noqa: E402
 from src.context_aware_audio.content_store import ContentStore  # noqa: E402
 from src.context_aware_audio.content_sync import SyncResult, list_windows, sync_window  # noqa: E402
-from src.context_aware_audio.paths import content_library_dir  # noqa: E402
-from src.context_aware_audio.settings import load_settings  # noqa: E402
+from src.context_aware_audio.paths import (  # noqa: E402
+    content_db_path,
+    content_library_dir,
+)
+from src.context_aware_audio.settings import load_settings, sync_token  # noqa: E402
 
 # النوافذ بالترتيب الذي يفضّله المحرك اختيارها. الترتيب لا يهم
 # للمزامنة (كل نافذة مستقلة) لكنه يثبّت السجل.
@@ -39,19 +42,22 @@ def _echo(message: str) -> None:
 
 def run(
     windows: Optional[List[str]] = None,
-    max_parts: int = 0,
+    max_parts: Optional[int] = None,
     dry_run: bool = False,
 ) -> int:
     """
     مزامنة واحدة كاملة. يُرجع رمز خروج للمشغّل: 0 كل شيء تمام.
 
-    `max_parts` صفر يعني بلا حدّ - وهو الوضع الصحيح لساعة واحدة
-    في الخلفية، بخلاف الجلسة اليدوية داخل التطبيق حيث يحدّه
-    المستخدم حتى لا ينتظر.
+    `max_parts` يُقرأ من `content_sync_max_parts` إن لم يُمرَّر. كان
+    افتراضه صفراً أي «بلا حدّ»، والمسار غير المحروس يسحب النوافذ
+    الأربع كاملة: عكس ما يوثّقه الإعداد. ساعة واحدة بلا supervision
+    تسحب ما توفّر من القرص، فالسقف ليس ترفاً.
     """
     settings = load_settings()
+    if max_parts is None:
+        max_parts = int(float(settings.get("content_sync_max_parts", 20) or 20))
     base = str(settings.get("content_sync_url", "")).strip()
-    token = str(settings.get("content_sync_token", "")).strip()
+    token = sync_token(str(settings.get("content_sync_token", "")))
 
     if not base:
         _echo("القلب: لا يوجد خادم (content_sync_url فارغ) - لا شيء يفعل")
@@ -94,14 +100,26 @@ def run(
     # الفحص مرة واحدة عندها فقط، وعندها فقط: كل ساعة بلا جديد
     # تعني 312 قياساً بلا فائدة. والقياس يقرأ الملفات كل مرة.
     if any_new and not dry_run:
+        # القاعدة من paths.py لا من dest.parent: مع content_library_dir
+        # مضبوط كان القلب يبني قاعدته بجانب المكتبة، والواجهة تقرأ
+        # من مجلد البيانات. فكتب في قاعدة لا تُفتح، وبقيت قائمة
+        # المحتوى في الواجهة قديمة.
+        store = None
         try:
-            store = ContentStore(dest.parent / "content.db")
+            store = ContentStore(content_db_path())
             report = ContentLibrary(dest, store, EngineConfig()).scan()
-            store.close()
             _echo(f"القلب: فُحص {report.total} مقطعاً "
                   f"({report.added} جديد، {report.updated} محدَّث)")
         except Exception as exc:
             _echo(f"القلب: تعذّر الفحص: {exc}")
+        finally:
+            # الفحص يرمي أحياناً بعد فتح القاعدة، وclose() خارج
+            # try يعني مقبضاً مسرّباً في عملية exits مباشرة.
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    pass
 
     _echo(f"القلب: انتهى - {total_new} جديد، {total_failed} فشل")
     return 1 if total_failed else 0

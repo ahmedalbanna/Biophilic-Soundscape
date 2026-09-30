@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<!--
+  index.html - واجهة المحرك على المتصفح
+
+  صفحة واحدة بلا إطار عمل ولا حزمة: المشروع بلا اعتمادية، وأي
+  CDN يجعله يحتاج شبكة ليعمل. فكل ما هنا HTML و CSS و JavaScript
+  خام.
+
+  القاعدة: الصفحة لا تقرّر شيئاً ولا تحسب. ترسم `state()` وتستدعي
+  أمراً. كل منطق في service.py — ولو أخطأت الصفحة في الرسم فالصوت
+  يبقى على قراره الصحيح.
+-->
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>محرك الصوت التكيفي — صنعاء</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <h1>محرك الصوت التكيفي — صنعاء</h1>
+  <div class="clocks">
+    <span id="simclock" class="chip">—</span>
+    <span id="realclock" class="chip dim">—</span>
+    <span id="link" class="chip warn">يتصل…</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ===== المحكّم ===== -->
+<section class="panel">
+  <button id="btn-start" class="primary">ابدأ</button>
+  <button id="btn-stop">إيقاف</button>
+  <div class="meter"><div id="meter-fill"></div></div>
+  <div id="dbline" class="mono dim">dB: —</div>
+  <div id="stateline" class="state">—</div>
+  <div id="periodline" class="dim">—</div>
+  <div id="prayerline" class="dim">—</div>
+  <p id="playererr" class="error" hidden></p>
+</section>
+
+<!-- ===== الصوت ===== -->
+<section class="panel">
+  <h2>الصوت</h2>
+  <label>الصوت الرئيسي <output id="out-vol">100</output>
+    <input type="range" id="in-vol" min="0" max="100" step="1" value="100">
+  </label>
+  <label class="row"><input type="checkbox" id="in-mute"> كتم رئيسي</label>
+  <label>عمق خفض الكلام <output id="out-duck">70</output>
+    <input type="range" id="in-duck" min="0" max="95" step="5" value="70">
+  </label>
+  <div class="row">
+    <span class="dim">مستويات:</span>
+    <button data-duck="60">خفيف 60%</button>
+    <button data-duck="70">عادي 70%</button>
+    <button data-duck="80">عميق 80%</button>
+  </div>
+  <label class="row"><input type="checkbox" id="in-athan"> نغمة لحظة الأذان</label>
+</section>
+
+<!-- ===== الميكروفون ===== -->
+<section class="panel">
+  <h2>الميكروفون</h2>
+  <label class="row"><input type="checkbox" id="in-usemic"> استعمال الميكروفون</label>
+  <label>الجهاز
+    <select id="in-device"></select>
+  </label>
+  <div class="row">
+    <button id="btn-mic-list">سرد الأجهزة</button>
+    <button id="btn-calibrate">عايرة (2ث صمت)</button>
+    <span id="micinfo" class="dim"></span>
+  </div>
+  <label>مستوى يدوي (بلا ميكروفون) <output id="out-db">25</output>
+    <input type="range" id="in-db" min="0" max="100" step="1" value="25">
+  </label>
+</section>
+
+<!-- ===== المحتوى ===== -->
+<section class="panel">
+  <h2>المحتوى التعليمي</h2>
+  <label class="row"><input type="checkbox" id="in-contenabled"> تفعيل المسار</label>
+  <label class="row"><input type="checkbox" id="in-contentmute"> كتم المحتوى</label>
+  <label>مستوى المحتوى <output id="out-cvol">85</output>
+    <input type="range" id="in-cvol" min="0" max="100" step="1" value="85">
+  </label>
+  <div id="content-title" class="state">لا يوجد مقطع جارٍ</div>
+  <div class="meter thin"><div id="content-fill"></div></div>
+  <div id="content-state" class="dim">—</div>
+  <div class="row">
+    <button id="btn-cplay">شغّل الآن</button>
+    <button id="btn-cskip">تخطّي</button>
+    <button id="btn-crescan">إعادة فحص المكتبة</button>
+    <button id="btn-copen">افتح المجلد</button>
+  </div>
+  <div class="mono dim" id="content-lib">—</div>
+  <p id="content-err" class="error" hidden></p>
+</section>
+
+<!-- ===== الخادم ===== -->
+<section class="panel">
+  <h2>السحب من الخادم</h2>
+  <label>عنوان الخادم
+    <input type="text" id="in-url" placeholder="http://host:port" dir="ltr">
+  </label>
+  <label>الرمز
+    <input type="password" id="in-token" dir="ltr" autocomplete="off">
+  </label>
+  <label>أقصى عدد بالجلسة
+    <input type="number" id="in-parts" min="1" max="500" step="1" value="20">
+  </label>
+  <div class="row">
+    <select id="in-window"></select>
+    <button id="btn-sscan" class="primary">تحديث القائمة</button>
+    <button id="btn-ssync">سحب</button>
+  </div>
+  <div id="sync-text" class="mono dim">—</div>
+  <p id="sync-note" class="error" hidden></p>
+</section>
+
+<!-- ===== الوقت ===== -->
+<section class="panel">
+  <h2>تبديل الوقت</h2>
+  <label class="row"><input type="checkbox" id="in-sim"> تفعيل محاكاة الساعة</label>
+  <div class="row">
+    <input type="time" id="in-hhmm" value="14:00" step="60">
+    <button id="btn-simset">اضبط</button>
+    <button data-nudge="-1">−1س</button>
+    <button data-nudge="1">+1س</button>
+    <button id="btn-simreset">عودة للحقيقي</button>
+  </div>
+  <div class="row">
+    <span class="dim">سيناريو:</span>
+    <button data-scen="debate">نقاش حامي</button>
+    <button data-scen="welcome">ترحيب</button>
+    <button data-scen="silence">هدوء 12ث</button>
+    <button data-scen="talk">كلام عادي</button>
+  </div>
+</section>
+
+<!-- ===== السجل ===== -->
+<section class="panel wide">
+  <h2>السجل</h2>
+  <div id="log" class="log mono"></div>
+</section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

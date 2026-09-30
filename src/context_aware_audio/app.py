@@ -35,8 +35,8 @@ from src.context_aware_audio.real_player import RealPlayer
 from src.context_aware_audio.settings import load_settings, save_settings
 from src.context_aware_audio.content_library import ContentLibrary
 from src.context_aware_audio.content_store import ContentStore
-from src.context_aware_audio.content_sync import list_windows, sync_window
-from src.context_aware_audio.paths import content_library_dir, user_data_dir
+from src.context_aware_audio.content_sync import list_windows_why, sync_window
+from src.context_aware_audio.paths import content_db_path, content_library_dir
 from src.context_aware_audio.real_content import RealContentPlayer
 from src.context_aware_audio.sim_clock import SimClock
 from src.context_aware_audio.sound_synth import ensure_assets, missing_assets
@@ -280,7 +280,20 @@ class DesktopApp:
         ]
         self._sync_window = tk.StringVar(value=self._sync_windows[0])
         self.content_sync_text = tk.StringVar(value="")
-        self.content_sync_url = str(self._settings.get("content_sync_url", ""))
+        # إعدادات الخادم حقول حقيقية لا سلاسل مقروءة مرة واحدة. كانت
+        # سلسلة عادية في __init__: لا حقل في الواجهة يكتبها، ولا يدخل لقطة
+        # الإعدادات فلا تُحفظ، فلا سبيل لضبطها إلا تحرير
+        # settings.json باليد.
+        self.content_sync_url = tk.StringVar(
+            value=str(self._settings.get("content_sync_url", ""))
+        )
+        self.content_sync_token = tk.StringVar(
+            value=str(self._settings.get("content_sync_token", ""))
+        )
+        self.content_sync_parts = tk.StringVar(
+            value=str(int(self._settings.get("content_sync_max_parts", 20)))
+        )
+        self.content_sync_note = tk.StringVar(value="")
         self._init_content()
         # الإعداد يمرّ مرة واحدة: نحوّله إلى إعدادات المحرك، ومنها
         # engine.duck_max_ratio. مصدر واحد لا قيمتان متناقضتان.
@@ -341,6 +354,13 @@ class DesktopApp:
         except Exception as e:
             # إيقاف الأخطاء يجب ألّا يمنع إغلاق النافذة
             print(f"close error: {e}")
+        # فكّ ربط التمرير هنا لا في stop(): الزر يستدعي stop() كثيراً
+        # وربطٌ يُفكّ هناك لا يعود. unbind على الجذر يزيل ما ربطناه
+        # نحن وحده، بخلاف unbind_all الذي يمسح كل MouseWheel.
+        try:
+            self.root.unbind("<MouseWheel>")
+        except (tk.TclError, KeyError):
+            pass
         self.root.destroy()
 
     def _settings_snapshot(self) -> dict:
@@ -358,6 +378,9 @@ class DesktopApp:
             "content_muted": bool(self.content_muted.get()),
             "content_volume": self.config.content_volume,
             "content_library_dir": str(self._settings.get("content_library_dir", "")),
+            "content_sync_url": self.content_sync_url.get(),
+            "content_sync_token": self.content_sync_token.get(),
+            "content_sync_max_parts": self._sync_parts(),
         }
 
     def _save_settings(self) -> bool:
@@ -379,12 +402,8 @@ class DesktopApp:
         shell = ttk.Frame(self.root)
         shell.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(
-            shell, highlightthickness=0, bd=0, background="#f0f0f0"
-        )
-        bar = ttk.Scrollbar(
-            shell, orient="vertical", command=canvas.yview
-        )
+        canvas = tk.Canvas(shell, highlightthickness=0, bd=0, background="#f0f0f0")
+        bar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=bar.set)
         bar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
@@ -412,17 +431,16 @@ class DesktopApp:
             if step:
                 canvas.yview_scroll(step, "units")
 
-        # يُربط على الإطار الداخلي لا على اللوحة: كل الأدوات
-        # تنسخ إليها، فيصلها الحدث بلا ربط لكل واحدة.
-        # bind_all يحتاج حصراً عند الإغلاق - وإلا تراكم مستمعون
-        # كلهم يمرّرون اللوحة.
-        f.bind_all("<MouseWheel>", _wheel)
+        # يُربط على الجذر لا على bind_all. الربط العام يلتقط كل
+        # عجلة فأرة في التطبيق: قوائم القوائم المنسدلة كانت تمرّر
+        # اللوحة بدل نفسها. وفكّ الربط العام يمسح كل ربط لعجلة
+        # الفأرة في التطبيق بلا تمييز، وTk لا يعطي بايثون مُعرِّف
+        # دالة يمكن سحبها وحدها. فالجذر هو المدى الضيّق الذي نفكّه:
+        # الربط عليه يسقط معه وحده.
+        self.root.bind("<MouseWheel>", _wheel)
         self._canvas = canvas
         self._scrollbar = bar
-        # محفوظان لأن الفحص يحتاجهما: العربة محلية، وربط عام بلا
-        # مرجع إليه لا يمكن فكّه إلا من هنا.
         self._wheel = _wheel
-        self._wheel_binding = ("<MouseWheel>", _wheel)
 
         ttk.Label(
             f, text="محرك الصوت التكيفي - صنعاء", font=("Segoe UI", 14, "bold")
@@ -672,7 +690,7 @@ class DesktopApp:
         التطبيق يعمل بالخلفية وحدها، واللوحة تشرح السبب.
         """
         try:
-            self._content_store = ContentStore(user_data_dir() / "content.db")
+            self._content_store = ContentStore(content_db_path())
         except Exception as exc:
             self._set_content_error(f"تعذّر فتح قاعدة المحتوى: {exc}")
             self._content_store = None
@@ -835,20 +853,31 @@ class DesktopApp:
         if self._sync_running:
             self._log("المزامنة: جارية بالفعل")
             return
-        if not self.content_sync_url:
-            self._log("المزامنة: لا يوجد خادم - اضبط content_sync_url")
-            self.content_sync_text.set("لا يوجد خادم")
+        base = self._sync_base()
+        if not base:
+            self._log("المزامنة: لا يوجد خادم صالح")
+            self.content_sync_text.set("لا يوجد خادم صالح")
             return
         self._sync_running = True
         window = self._sync_window.get()
-        base = self.content_sync_url
-        token = str(self._settings.get("content_sync_token", ""))
-        max_parts = int(float(self._settings.get("content_sync_max_parts", 20) or 20))
+        token = self._sync_token_now()
+        max_parts = self._sync_parts()
         dest = self.content_library_path
+
+        def on_progress(done, total):
+            """تحديث العدّاد من خيط العامل. الطابور آمن بين الخيوط."""
+            self._sync_queue.put(("progress", (done, total)))
 
         def work():
             try:
-                result = sync_window(dest, base, window, token, max_parts=max_parts)
+                result = sync_window(
+                    dest,
+                    base,
+                    window,
+                    token,
+                    max_parts=max_parts,
+                    on_progress=on_progress,
+                )
                 self._sync_queue.put(("result", result))
             except Exception as exc:  # شبكة أو قرص - لا يُسقط التطبيق
                 self._sync_queue.put(("error", str(exc)))
@@ -858,21 +887,90 @@ class DesktopApp:
             self._sync_button.state(["disabled"])
         threading.Thread(target=work, daemon=True).start()
 
+    def _sync_base(self) -> str:
+        """
+        عنوان الخادم بعد التنقية، مع حفظه في الإعدادات.
+
+        `_as_url` يرفض ما لا يبدأ بـ http أو https، ويرفض ما هو
+        فارغ. الرفض الصامت كان يهدر تعب المستخدم: يكتب عنواناً
+        خاطئاً فيرى «لا يوجد خادم» بلا سبب. فنذكر السبب في الحقل.
+        """
+        from src.context_aware_audio.settings import _as_url
+
+        typed = self.content_sync_url.get().strip()
+        clean = _as_url(typed)
+        if clean != typed.rstrip("/") and typed:
+            if not clean:
+                self.content_sync_note.set(
+                    "العنوان مرفوض: لا يبدأ بـ http:// أو https://"
+                )
+            else:
+                self.content_sync_note.set(f"استُخدم: {clean}")
+        elif clean:
+            self.content_sync_note.set("")
+        return clean
+
+    def _sync_parts(self) -> int:
+        """سقف الملفات في الجلسة، بقيمة settings عند ما لا يُقرأ."""
+        try:
+            value = int(float(self.content_sync_parts.get()))
+        except (TypeError, ValueError, tk.TclError):
+            value = 20
+        return max(1, min(500, value))
+
+    def _sync_token_now(self) -> str:
+        """
+        الرمز المستعمل فعلاً، مع تنبيه إن غلب متغيّر البيئة.
+
+        البيئة تتقدّم على الحقل عمداً. لكنّ من يكتب رمزاً في الواجهة
+        ويرى السحب يفشل بلا سبب، ظنّاً أن ما كتبه خطأ: فقوله هنا
+        الفرق بين «الرمز مرفوض» و«الرمز مُتجاهَل».
+        """
+        from src.context_aware_audio.settings import TOKEN_ENV_VAR, sync_token
+        from os import environ
+
+        typed = self.content_sync_token.get().strip()
+        if environ.get(TOKEN_ENV_VAR, "").strip() and typed:
+            self.content_sync_note.set(
+                f"الرمز من متغيّر البيئة {TOKEN_ENV_VAR}، لا من الحقل"
+            )
+        return sync_token(typed)
+
     def _on_content_sync_scan(self):
         """يحدّث قائمة النوافذ من فهرس الخادم - في خيط عامل أيضاً."""
-        if not self.content_sync_url:
+        base = self._sync_base()
+        if not base:
             return
-        base = self.content_sync_url
-        token = str(self._settings.get("content_sync_token", ""))
+        token = self._sync_token_now()
 
         def work():
             try:
-                found = list_windows(base, token)
-                self._sync_queue.put(("windows", [w.get("window", "") for w in found]))
+                found, why = list_windows_why(base, token)
+                self._sync_queue.put((
+                    "windows",
+                    ([w.get("window", "") for w in found], why),
+                ))
             except Exception as exc:
                 self._sync_queue.put(("error", str(exc)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _sync_idle(self):
+        """
+        يُعيد زر المزامنة إلى حالته العادية.
+
+        دالة واحدة لأن الضبط كان مكرَّراً في ثلاثة فروع، وأي فرع
+        جديد ينساه. وفي الاستثناء تحديداً: كانت تُلتقط استثناءات
+        بنوعين اثنين فقط، فأي غيرهما يترك `_sync_running` True
+        وزراً معطّلاً حتى يُعاد تشغيل التطبيق.
+        """
+        self._sync_running = False
+        button = getattr(self, "_sync_button", None)
+        if button is not None:
+            try:
+                button.state(["!disabled"])
+            except tk.TclError:
+                pass
 
     def _drain_sync_queue(self):
         """كل تحديثات المزامنة تحدث هنا في خيط الواجهة."""
@@ -883,22 +981,39 @@ class DesktopApp:
                 return
             try:
                 if kind == "error":
-                    self._sync_running = False
-                    if getattr(self, "_sync_button", None) is not None:
-                        self._sync_button.state(["!disabled"])
-                    self.content_sync_text.set("فشل الاتصال")
+                    # غير مميّز: كان كل خطأ يُعرض «فشل الاتصال» حتى
+                    # خطأ القرص. _write_state يرمي OSError بعد أن
+                    # نُزّل كل ملف ونجح: العطب قرص لا شبكة.
+                    self._sync_idle()
+                    is_disk = isinstance(payload, OSError) or (
+                        "content-sync-state" in str(payload)
+                    )
+                    self.content_sync_text.set(
+                        "فشل حفظ الحالة" if is_disk else "فشل الاتصال"
+                    )
                     self._log(f"المزامنة: {payload}")
+                elif kind == "progress":
+                    # بلا هذا كان السحب يبدو معلّقاً: النص يقول
+                    # «جارٍ السحب...» حتى ينتهي عشرون ملفاً.
+                    done_n, total_n = payload
+                    if total_n:
+                        self.content_sync_text.set(f"جارٍ السحب... {done_n}/{total_n}")
                 elif kind == "windows":
-                    names = [n for n in payload if n]
+                    names, why = payload
                     if names:
                         self._sync_windows = names
                         self._sync_window.set(names[0])
+                        self.content_sync_text.set(f"{len(names)} نافذة على الخادم")
                         self._log(f"المزامنة: {len(names)} نافذة على الخادم")
+                    else:
+                        # الفهرس قد لا يكون موجوداً على خادم صالح،
+                        # فالسكوت هنا يعني «لا أعرف ما هي النوافذ».
+                        # سببٌ واحد؛ قد يبقى السحب يعمل.
+                        self.content_sync_note.set(f"الفهرس: {why}")
+                        self._log(f"المزامنة: تعذّر جلب الفهرس - {why}")
                 else:
                     r = payload
-                    self._sync_running = False
-                    if getattr(self, "_sync_button", None) is not None:
-                        self._sync_button.state(["!disabled"])
+                    self._sync_idle()
                     if r.cancelled:
                         self.content_sync_text.set("أُلغيت")
                     elif r.ok:
@@ -914,15 +1029,18 @@ class DesktopApp:
                         )
                         self._update_content_readout()
                     else:
-                        self.content_sync_text.set(
-                            f"{r.window}: {r.failed} فشل"
-                        )
+                        self.content_sync_text.set(f"{r.window}: {r.failed} فشل")
                         self._log(f"المزامنة {r.window}: {r.failed} فشل")
                     for e in r.errors[:3]:
                         self._log(f"المزامنة: {e}")
-            except (tk.TclError, KeyError) as e:
-                self._sync_running = False
-                self._log(f"sync queue item {kind} failed: {e}")
+            except Exception as e:
+                # كل شيء. كان يُلتقط نوعان فقط، فاستثناء واحد غريب
+                # كان يوقف الدوران كلّه: تبقى عناصر الطابور التالية
+                # بلا معالجة ويبقى الزر معطّلاً.
+                self._log(f"تعذّرت معالجة نتيجة المزامنة ({kind}): {e}")
+            finally:
+                # الضمان: مهما هلك أي فرع، تعود الحالة.
+                self._sync_idle()
 
     def _on_content_rescan(self):
         """يعيد فحص المجلد. مكتبة فارغة حالة صريحة لا صمت."""
@@ -1011,6 +1129,33 @@ class DesktopApp:
             foreground="#555",
         ).pack(side="left", padx=8)
 
+        # إعدادات الخادم أولاً: بلا عنوان لا معنى لزر السحب، والزر
+        # كان يقول «لا يوجد خادم» بينما لا حقل في الواجهة لكتابة
+        # عنوان. الحقول قبل النافذة والزر.
+        srv = ttk.Frame(box)
+        srv.pack(fill="x", pady=(6, 0))
+        ttk.Label(srv, text="عنوان الخادم:").pack(side="left", padx=(0, 4))
+        ttk.Entry(srv, textvariable=self.content_sync_url, width=34).pack(
+            side="left", padx=2
+        )
+        ttk.Label(srv, text="الرمز:").pack(side="left", padx=(8, 4))
+        ttk.Entry(
+            srv,
+            textvariable=self.content_sync_token,
+            width=18,
+            show="*",
+        ).pack(side="left", padx=2)
+        ttk.Label(srv, text="أقصى عدد بالجلسة:").pack(side="left", padx=(8, 4))
+        ttk.Entry(srv, textvariable=self.content_sync_parts, width=5).pack(
+            side="left", padx=2
+        )
+
+        ttk.Label(
+            box,
+            textvariable=self.content_sync_note,
+            font=("Segoe UI", 8),
+            foreground="#a03000",
+        ).pack(anchor="w", pady=(2, 0))
         # السحب من الخادم: نافذة واحدة في المرة، والزر معطّل أثناء العمل.
         sync = ttk.Frame(box)
         sync.pack(fill="x", pady=(6, 0))
@@ -1027,9 +1172,9 @@ class DesktopApp:
             sync, text="تحديث", command=self._on_content_sync
         )
         self._sync_button.pack(side="left", padx=2)
-        ttk.Button(
-            sync, text="تحديث القائمة", command=self._on_content_sync_scan
-        ).pack(side="left", padx=2)
+        ttk.Button(sync, text="تحديث القائمة", command=self._on_content_sync_scan).pack(
+            side="left", padx=2
+        )
         ttk.Label(
             sync,
             textvariable=self.content_sync_text,
@@ -1095,17 +1240,18 @@ class DesktopApp:
         self._log(f"engine started (player={self.player.backend})")
 
     def stop(self):
+        """
+        يوقف المحرّك والصوت.
+
+        لا يلمس ربط عجلة الفأرة. كان يفكّه هنا، وزر «إيقاف» ينادي
+        هذه الدالة: ضغطة واحدة كانت تقتل التمرير لبقية الجلسة، لأن
+        `start()` لا يعيد الربط أصلاً - وليس لأن `unbind_all` كان
+        واسعاً. الفكّ مكانه الإغلاق.
+        """
         self.running = False
         self.mic.stop()
         self.player.stop()
         self.status_text.set("متوقف")
-        # حصر ربط عجلة الفأرة: bind_all في bind() العام، وإلا بقي
-        # مستمع بعد الإغلاق فيعيد كل مرة تركيب الواجهة.
-        if getattr(self, "_wheel_binding", None):
-            try:
-                self.root.unbind_all(self._wheel_binding[0])
-            except (tk.TclError, KeyError):
-                pass
 
     def _load_prayer_async(self):
         def work():

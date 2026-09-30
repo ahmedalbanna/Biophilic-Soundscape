@@ -19,32 +19,51 @@ TASK_NAME = "ContextAudio Content Sync"
 TASK_DESC = "سحب المحتوى التعليمي من الخادم - كل ساعة"
 
 
-def _task_cmd() -> list:
+def _run_string() -> str:
+    """
+    نص المهمة: انتقال إلى جذر المستودع ثم تشغيل القلب.
+
+    `cmd /c cd /d "<root>" && ...` — الانتقال ضروري لأن الوحدة
+    تُشغَّل بـ -m وتبحث عن src في مجلد العمل.
+
+    أي `&` أو `^` في المسار يكسر سلسلة cmd، والبادئة `^^`
+    تهرّبه. والمسار بأقواس أصلاً.
+    """
+    root = Path(__file__).resolve().parents[2]
+    escaped = str(root).replace("^", "^^").replace("&", "^^&")
+    return (
+        f'cmd /c cd /d "{escaped}" && "'
+        f'{sys.executable}" -m src.context_aware_audio.content_heartbeat'
+    )
+
+
+def _task_cmd(interval_minutes: int = 60) -> list:
+    """
+    أمر schtasks كامل.
+
+    دالة واحدة يبنيها الفروع: كان `install` يعيد بناء الأمر مرتين
+    متطابقتين لا فرق بينهما إلا مبادلتَا /SC و/MO.
+
+    الحارس في الأعلى: صفر أو سالب كان ينتج /MO 0 في فرع الدقيقة،
+    لأن max(1, …) لم يكن إلا في فرع الساعة. و`/MO 0` يرفضه
+    schtasks، فيفشل التثبيت برسالة غامضة.
+    """
+    minutes = max(1, int(interval_minutes))
+    if minutes < 60:
+        schedule = ["/SC", "MINUTE", "/MO", str(minutes)]
+    else:
+        schedule = ["/SC", "HOURLY", "/MO", str(max(1, minutes // 60))]
     return [
         "schtasks", "/Create", "/TN", TASK_NAME,
-        "/TR", f'"{sys.executable}" -m src.context_aware_audio.content_heartbeat',
-        "/SC", "HOURLY", "/MO", "1",
+        "/TR", _run_string(),
+        *schedule,
         "/F",
     ]
 
 
 def install(interval_minutes: int = 60) -> int:
     """ينشئ المهمة أو يحدّثها إن وُجدت. يعيد رمز العملية."""
-    root = Path(__file__).resolve().parents[2]
-    cmd = [
-        "schtasks", "/Create", "/TN", TASK_NAME,
-        "/TR", f'cmd /c cd /d "{root}" && "{sys.executable}" -m src.context_aware_audio.content_heartbeat',
-        "/SC", "HOURLY",
-        "/MO", str(max(1, interval_minutes // 60) if interval_minutes >= 60 else 1),
-        "/F",
-    ]
-    if interval_minutes < 60:
-        cmd = [
-            "schtasks", "/Create", "/TN", TASK_NAME,
-            "/TR", f'cmd /c cd /d "{root}" && "{sys.executable}" -m src.context_aware_audio.content_heartbeat',
-            "/SC", "MINUTE", "/MO", str(interval_minutes),
-            "/F",
-        ]
+    cmd = _task_cmd(interval_minutes)
     print("إنشاء المهمة:")
     print("  " + " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)

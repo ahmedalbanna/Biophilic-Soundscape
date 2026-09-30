@@ -30,16 +30,18 @@ DEFAULTS = {
     "content_volume": 0.85,
     "content_library_dir": "",
     # سحب المحتوى من الخادم. عنوان مُثبَّت حتى يعمل heartbeat بلا
-    # إعداد يدوي؛ والمزامنة تبقى معطّلة إن كان الحقل فارغاً.
-    #
-    # تنبيه: بلا TLS، والرمز يمرّ نصّياً صريحاً. العنوان عام على
-    # الإنترنت، فأي قارئ للشبكة يرى `dev-token` على المسار. خلف
-    # NAT في المنزل مقبول؛ على شبكة غير موثوقة غيّر الرمز وأضف
-    # شهادة.
-    "content_sync_url": "http://185.190.140.93:8787",
-    "content_sync_token": "dev-token",
+    # المزامنة اختيارية: عنوان فارغ تعني معطّلة. كان الافتراضي عنواناً
+    # عاماً برقم «dev-token» مكتوباً في كل نسخة، فيرسل كل مستخدم الرمز
+    # نفسه صريحاً على HTTP بلا TLS إلى عنوان لا يملكه. الافتراضي الفارغ
+    # يجعل التشغيل صامتاً وآمناً، والتفعيل اختيار صريح.
+    "content_sync_url": "",
+    "content_sync_token": "",
     "content_sync_max_parts": 20,
 }
+
+# اسم متغيّر البيئة الذي يُقرأ منه الرمز. لـ URI عام أو خادم مشترك
+# هو الموضع الصحيح للرمز: خارج الإعدادات التي تُرفع وتُنسخ.
+TOKEN_ENV_VAR = "CONTENT_SYNC_TOKEN"
 
 
 def settings_path() -> Path:
@@ -113,13 +115,22 @@ def _as_url(value: Any) -> str:
     """
     عنوان خادم المزامنة، أو نص فارغ يعني «المزامنة معطّلة».
 
-    يُقصّ على 300 محرفاً مثل `_as_dir`. لا يُتحقّق من المخطط هنا:
-    مزامنة خاطئة تظهر كرسالة خطأ واضحة، أما رفضُ عنوان صحيح
-    خالٍ من المخطط فيجعل الإعداد مستحيلاً.
+    يُقصّ على 300 محرفاً مثل `_as_dir`.
+
+    المخطط محصور بـ http/https. لم يكن محصوراً، و`urlopen` يحترم
+    `file://`: فملف إعدادات معدَّل يحوّل مسار الـmanifest إلى قارئ
+    ملف محلي. عنوان بلا مخطط يُرفض أيضاً — الإعداد الصامت أسهل على
+    من يقصده من رسالة خطأ غامضة.
     """
     if not isinstance(value, str):
         return ""
-    return value.strip().rstrip("/")[:300]
+    url = value.strip().rstrip("/")[:300]
+    if not url:
+        return ""
+    low = url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        return ""
+    return url
 
 
 def _as_token(value: Any) -> str:
@@ -155,6 +166,22 @@ _COERCERS: dict[str, Callable[[Any], Any]] = {
         v, DEFAULTS["content_sync_max_parts"], 1.0, 500.0
     ),
 }
+
+
+def sync_token(stored: str = "") -> str:
+    """
+    رمز المزامنة الفعّال: من متغيّر البيئة أولاً، ثم من الإعدادات.
+
+    البيئة أولاً لأنها خارج الملف: من يضع الرمز في ملف
+    الإعدادات يوزّعه مع كل نسخة. وحقل الملف يبقى محترَماً لمن يعمل
+    خلف NAT على جهازه وحده.
+    """
+    from os import environ
+
+    env = environ.get(TOKEN_ENV_VAR, "").strip()
+    if env:
+        return env[:200]
+    return str(stored or "").strip()[:200]
 
 
 def load_settings() -> dict:
