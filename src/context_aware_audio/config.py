@@ -6,6 +6,8 @@ config.py - إعدادات المحرك القابلة للضبط
 from dataclasses import dataclass, field
 from typing import Dict
 
+from .audio_types import DayPeriod
+
 
 @dataclass
 class EngineConfig:
@@ -104,6 +106,75 @@ class EngineConfig:
                 "file": "wind_coffee_trees.wav",
                 "db": 32,
                 "label": "ريح بين شجر البن",
+            },
+        }
+    )
+
+    # ===================================================================
+    # مسار المحتوى التعليمي: أحاديث وقصص الأنبياء
+    # ===================================================================
+    # المحتوى فوق الخلفية لا بدلاً منها. يقرر content_engine، وينفّذ
+    # real_content. المفتاح想问: أي فترة من اليوم يسمح بسرد أي نص.
+
+    content_enabled: bool = True
+
+    # --- بوابة الانتباه ---
+    # فوق هذا المستوى نؤجّل البثّ: المجلس الصاخب أو فيه ضجيج
+    # يقطع السرد ولا يقطع سماعه.
+    content_gate_max_db: float = 50.0
+    content_gate_delay_min: int = 10  # مدة التأجيل ثم إعادة الفحص
+    content_gate_max_postpones: int = 3  # بعدها تُهجر النافذة لليوم
+
+    # --- المقاطعة والاستئناف ---
+    content_rewind_sec: float = 3.0  # نتراجع هذه الثواني عند كلام
+    content_resume_quiet_sec: float = 5.0  # هدوء متصل قبل الاستئناف
+
+    # --- المستويات ---
+    # الاستبدال لا الضرب: تحت المحتوى نسبة 20% ثم هي المبلغ. لو ضُربت
+    # في منحنى الخفض لصارت الخلفية صامتة تماماً (0.20 × 0.10).
+    content_ambient_ratio: float = 0.20
+    content_volume: float = 0.85
+    content_min_gap_min: int = 30  # لا مقطعين متتاليين في نافذة واحدة
+
+    # --- نوافذ المحتوى ---
+    # مربوطة بفترات DayPeriod القائمة، لا بنظام موازٍ. «samra» لا
+    # «maghrib_isha» لأن الأخيرة فترة عبادة مكتومة.
+    content_windows: Dict[str, Dict] = field(
+        default_factory=lambda: {
+            "fajr_dhikr": {
+                "periods": [DayPeriod.FAJR_SABAH],
+                "label": "أذكار الفجر",
+                "kind": "dhikr",
+                "min_room_silence_sec": 5.0,
+                "once_per_day": True,
+            },
+            "duha_wisdom": {
+                "periods": [DayPeriod.DUHA_WORK],
+                "label": "حكمة وذكرى",
+                "kind": "wisdom",
+                "min_room_silence_sec": 8.0,
+                "once_per_day": True,
+            },
+            "maqil_story": {
+                "periods": [DayPeriod.MAQIL],
+                "label": "قصة من السيرة",
+                "kind": "story",
+                "min_room_silence_sec": 10.0,
+                "once_per_day": True,
+            },
+            "evening_ethic": {
+                "periods": [DayPeriod.SAMRA],
+                "label": "أخلاق وآداب",
+                "kind": "hadith",
+                "min_room_silence_sec": 8.0,
+                "once_per_day": True,
+            },
+            "night_calm": {
+                "periods": [DayPeriod.NIGHT_SLEEP],
+                "label": "ذكر هادئ",
+                "kind": "dhikr",
+                "min_room_silence_sec": 15.0,
+                "once_per_day": True,
             },
         }
     )

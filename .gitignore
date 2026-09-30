@@ -31,3 +31,8 @@ assets/settings.json
 assets/prayer_cache.json
 assets/*.log
 assets/*.tmp
+
+# مسار المحتوى: قاعدة البيانات والwal، كلها بيانات محلية
+content.db
+content.db-journal
+content.db-wal
