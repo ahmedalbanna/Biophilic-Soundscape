@@ -12,6 +12,7 @@ sim_clock.py - محاكاة ساعة الحائط لتجربة المحرك في
 - real_now(): كل ما يُقاس بالزمن (طوابع الإطارات، تواريخ السجل)
 """
 
+import math
 from datetime import datetime, timedelta
 
 MAX_OFFSET_SEC = 86_400  # يوم كامل - كافي لمحاكاة معقولة
@@ -31,7 +32,7 @@ class SimClock:
             value = float(seconds)
         except (TypeError, ValueError):
             return 0.0
-        if value != value or value in (float("inf"), float("-inf")):
+        if not math.isfinite(value):
             return 0.0
         return max(-MAX_OFFSET_SEC, min(MAX_OFFSET_SEC, value))
 
@@ -67,10 +68,13 @@ class SimClock:
         hour = max(0, min(23, int(hour)))
         minute = max(0, min(59, int(minute)))
         second = max(0, min(59, int(second)))
-        target = datetime.now().replace(
-            hour=hour, minute=minute, second=second, microsecond=0
-        )
-        self._offset_sec = self._clamp((target - datetime.now()).total_seconds())
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        self._offset_sec = self._clamp((target - now).total_seconds())
+
+    def set_enabled(self, on: bool) -> None:
+        """تفعيل أو تعطيل المحاكاة. الواجهة الوحيدة للتغيير من الخارج."""
+        self._enabled = bool(on)
 
     def nudge(self, hours: float) -> None:
         """يزيح الساعة بمقدار الساعات (سالب للتراجع)."""

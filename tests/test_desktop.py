@@ -19,7 +19,7 @@ from src.context_aware_audio.audio_types import EngineState, PlaybackCommand
 from src.context_aware_audio import prayer_provider, prayer_engine, settings
 from src.context_aware_audio.mic_input import MicInput
 from src.context_aware_audio.prayer_engine import PrayerEngine
-from src.context_aware_audio.real_player import RealPlayer
+from src.context_aware_audio.real_player import HISTORY_LIMIT, RealPlayer
 from src.context_aware_audio.sound_synth import (
     BUILDERS,
     ensure_assets,
@@ -1117,6 +1117,101 @@ finally:
         _root2.destroy()
     except Exception:
         pass
+
+
+# ============ 20) عزل أعطال التشغيل + واجهة الساعة ============
+from src.context_aware_audio.sim_clock import SimClock
+
+# واجهة عامة بدل الكتابة على _enabled من الخارج
+_cx = SimClock()
+_cx.set_enabled(True)
+check("sim: set_enabled is public and works", _cx.enabled is True)
+_cx.set_enabled(False)
+check("sim: set_enabled(False) disables", _cx.enabled is False)
+check("sim: clamp uses finite check", SimClock(offset_sec=float("nan")).offset_sec == 0.0)
+check("sim: clamp rejects inf", SimClock(offset_sec=float("inf")).offset_sec == 0.0)
+
+# حالة التفعيل تُحفظ: إزاحة بلا علم بها لا تقفز عند أول ضغطة
+_t20 = tempfile.mkdtemp()
+try:
+    with mock.patch.object(settings, "writable_path", lambda n: Path(_t20) / n):
+        (Path(_t20) / "settings.json").write_text(
+            json.dumps({"sim_offset_sec": -7200.0, "sim_enabled": True}), encoding="utf-8"
+        )
+        _s20 = settings.load_settings()
+        check("sim: enabled flag persisted", _s20["sim_enabled"] is True, _s20)
+        check("sim: offset persisted alongside", _s20["sim_offset_sec"] == -7200.0, _s20)
+        (Path(_t20) / "settings.json").write_text(
+            json.dumps({"sim_enabled": "false"}), encoding="utf-8"
+        )
+        check("sim: string 'false' means off",
+              settings.load_settings()["sim_enabled"] is False)
+        (Path(_t20) / "settings.json").write_text(
+            json.dumps({"sim_enabled": "true"}), encoding="utf-8"
+        )
+        check("sim: string 'true' means on",
+              settings.load_settings()["sim_enabled"] is True)
+finally:
+    import shutil
+
+    shutil.rmtree(_t20, ignore_errors=True)
+
+# خطأ التشغيل لا يوقف قراءة الواجهة
+_root3 = tk.Tk()
+_root3.withdraw()
+try:
+    from src.context_aware_audio.app import DesktopApp
+
+    _app3 = DesktopApp(_root3, log_path=None)
+    _app3.manual_db.set(30.0)
+    _app3.start()
+    for _ in range(8):
+        _root3.update()
+        _time.sleep(0.1)
+    _before3 = _app3.period_text.get()
+    with mock.patch.object(_app3.player, "apply", side_effect=RuntimeError("boom")):
+        for _ in range(8):
+            _root3.update()
+            _time.sleep(0.1)
+    _after3 = _app3.period_text.get()
+    check("player fault does not freeze the readouts", _after3 != "-" and bool(_after3),
+          _after3)
+    check("player fault logged once, not per tick",
+          _app3._player_error_logged is True)
+    _app3.stop()
+finally:
+    try:
+        _root3.destroy()
+    except Exception:
+        pass
+
+# الملف الناقص لا يغرق السجل على واجهة winsound أيضاً
+_missing_cmd = PlaybackCommand(
+    file="no_such_asset_probe.wav", target_db=38, volume_ratio=1.0,
+    fade_duration_sec=0.1, state=EngineState.DAILY_AMBIENT, reason="t",
+)
+_pl6 = RealPlayer()
+_pl6._pg = None
+_pl6._winsound = types.SimpleNamespace(PlaySound=lambda *a, **k: None)
+_pl6.backend = "winsound"
+_first6 = _pl6.apply(_missing_cmd)
+_second6 = _pl6.apply(_missing_cmd)
+_third6 = _pl6.apply(_missing_cmd)
+check("winsound: first attempt reports the failure", "PLAY-FAILED" in _first6, _first6)
+check("winsound: no repeat failure", "PLAY-FAILED" not in _second6, _second6)
+check("winsound: later attempts skip", "PLAY-SKIPPED" in _third6, _third6)
+check("winsound: quarantined", "no_such_asset_probe.wav" in _pl6._broken_assets)
+_pl6.stop()
+
+# السجل محدود الطول
+_pl7 = RealPlayer()
+for _ in range(HISTORY_LIMIT + 250):
+    _pl7.apply(PlaybackCommand(
+        file="water_stream.wav", target_db=38, volume_ratio=1.0,
+        fade_duration_sec=0.0, state=EngineState.DAILY_AMBIENT, reason="t"))
+check("player: history is bounded", len(_pl7.history) <= HISTORY_LIMIT,
+      len(_pl7.history))
+_pl7.stop()
 
 
 print(f"\nRESULT: {PASSED} passed / {FAILED} failed")

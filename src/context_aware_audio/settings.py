@@ -22,6 +22,7 @@ DEFAULTS = {
     "mic_device": None,
     "athan_enabled": True,
     "sim_offset_sec": 0.0,
+    "sim_enabled": False,
 }
 
 
@@ -85,10 +86,11 @@ _COERCERS: dict[str, Callable[[Any], Any]] = {
     "use_mic": lambda v: _as_bool(v, DEFAULTS["use_mic"]),
     "mic_device": _as_device,
     "athan_enabled": lambda v: _as_bool(v, DEFAULTS["athan_enabled"]),
-    # إزاحة محاكاة الساعة: يوم واحد قبل وبعد
+    # محاكاة الساعة: إزاحة يوم واحد قبل وبعد + حالة التفعيل
     "sim_offset_sec": lambda v: _as_float(
         v, DEFAULTS["sim_offset_sec"], -86_400.0, 86_400.0
     ),
+    "sim_enabled": lambda v: _as_bool(v, DEFAULTS["sim_enabled"]),
 }
 
 

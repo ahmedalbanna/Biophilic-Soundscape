@@ -26,6 +26,9 @@ ALERT_CHANNEL = 7
 # تضييق المجموعة إلى (OSError, ValueError) كان يُفوّت التلف بصمت.
 ASSET_ERRORS = (OSError, ValueError, RuntimeError, wave.Error)
 
+# السجل حلقة مغلقة: يُقصّ كي لا ينمو بلا حد عند 5 إدخالات في الثانية
+HISTORY_LIMIT = 500
+
 
 class RealPlayer:
     """مشغّل حقيقي بصوت فعلي: crossfade، fade ناعم، master volume، وEQ."""
@@ -240,13 +243,14 @@ class RealPlayer:
                         self._play_loop_winsound(None)
                 self.is_muted = True
                 self.current_volume = 0.0
+            elif self._is_broken(cmd.file):
+                # نُبلغ مرة واحدة على أي واجهة (pygame أو winsound). لا إعادة
+                # محاولة إلا إذا تغيّر الملف فعلاً، وإلا تحوّل العطل إلى إغراق
+                # في السجل عند 5 مرات في الثانية.
+                action = f"PLAY-SKIPPED {cmd.file} (broken, unchanged)"
             elif self._pg is not None:
                 fade_ms = int(max(0.0, cmd.fade_duration_sec) * 1000)
-                if self._is_broken(cmd.file):
-                    # نُبلغ مرة واحدة. لا إعادة محاولة إلا إذا تغيّر الملف فعلاً
-                    # (استُبدل أو أُصلح) - وإلا تحوّل الخطأ إلى إغراق في السجل.
-                    action = f"PLAY-SKIPPED {cmd.file} (broken, unchanged)"
-                elif self.is_muted or self.current_file != cmd.file:
+                if self.is_muted or self.current_file != cmd.file:
                     try:
                         self._ramp_gen += 1
                         self._pg_crossfade(cmd.file, eff, fade_ms or 400)
@@ -298,6 +302,8 @@ class RealPlayer:
                     self.is_muted = False
             line = f"{action} [{cmd.state.value}] {cmd.reason} (backend={self.backend})"
             self.history.append(line)
+            if len(self.history) > HISTORY_LIMIT:
+                del self.history[: len(self.history) - HISTORY_LIMIT]
             return line
 
     def stop(self) -> None:

@@ -45,7 +45,7 @@ METER_H = 22  # ارتفاع شريط قياس الـ dB
 CALIBRATE_SEC = 2.0  # مدة قياس ضجيج الغرفة
 ATHAN_VOLUME = 0.8  # مستوى نغمة تنبيه الأذان
 SIM_HINT = (
-    "الأزمنة المدوّنة زمن حقيقي: 10ث هدوء، 60س نقاش، 5د سكون."
+    "الأزمنة تعمل زمناً حقيقياً (لا تقفز أسبوع): 10ث هدوء، 60س نقاش، 5د سكون."
     + chr(10)
     + "لعرض «الليل» اضبط dB على صفر وانتظر 5 دقائق."
 )
@@ -172,6 +172,7 @@ class DesktopApp:
         self.player = RealPlayer()
         self._settings = load_settings()
         self.clock = SimClock(offset_sec=self._settings.get("sim_offset_sec", 0.0))
+        self.clock.set_enabled(bool(self._settings.get("sim_enabled", False)))
         self.mic = MicInput(device=self._settings.get("mic_device"))
         self._mic_devices = MicInput.list_devices()
 
@@ -179,7 +180,11 @@ class DesktopApp:
         self.use_mic = tk.BooleanVar(value=bool(self._settings.get("use_mic")))
         self.manual_db = tk.DoubleVar(value=25.0)
         self.greeting = tk.BooleanVar(value=False)
-        self.sim_on = tk.BooleanVar(value=False)
+        # نحفظ حالة التفعيل أيضاً: إزاحة محفوظة بلا علم بها تقفز
+        # فجأة عند أول ضغطة على المربع.
+        self.sim_on = tk.BooleanVar(
+            value=bool(self._settings.get("sim_enabled", False))
+        )
         self.sim_readout = tk.StringVar(value="-")
         self.sim_hour = tk.IntVar(value=self.clock.now().hour)
         self.sim_minute = tk.IntVar(value=self.clock.now().minute)
@@ -208,6 +213,7 @@ class DesktopApp:
         self._last_vol = -1.0
         self._last_eq = -1.0
         self._last_player = self.player
+        self._player_error_logged = False
         self.autostart = tk.BooleanVar(value=is_autostart())
         self._save_counter = 0
         self.period_eq = {
@@ -266,6 +272,7 @@ class DesktopApp:
             "mic_device": self.mic.device,
             "athan_enabled": bool(self.athan_enabled.get()),
             "sim_offset_sec": self.clock.offset_sec,
+            "sim_enabled": bool(self.clock.enabled),
         }
 
     def _save_settings(self) -> bool:
@@ -428,11 +435,11 @@ class DesktopApp:
         والحارس ضروري لأن trace يُستدعى أيضاً على الكتابة البرمجية،
         فبدونه يعيد إدخاله نفسه ويصارع الدقيقة.
         """
-        box = ttk.LabelFrame(parent, text="محاكاة الوقت", padding=8)
+        box = ttk.LabelFrame(parent, text="تبديل الوقت (تجربة)", padding=8)
         box.pack(fill="x", pady=6)
 
         ttk.Checkbutton(
-            box, text="محاكاة الوقت", variable=self.sim_on, command=self._on_sim_toggle
+            box, text="تدبيل الوقت (تجربة)", variable=self.sim_on, command=self._on_sim_toggle
         ).pack(anchor="w")
 
         ttk.Label(box, textvariable=self.sim_readout, font=("Consolas", 9)).pack(
@@ -658,7 +665,16 @@ class DesktopApp:
                 auto.is_speech = True
             if self.running:
                 cmd = self.engine.process_frame(auto, now)
-                self.player.apply(cmd)
+                # عطل في التشغيل لا يجب أن يوقف قراءة الواجهة: نعزله هنا
+                # ليبقى العدّاد والساعة يعملان، ونكتفي بتسجيله مرة واحدة.
+                try:
+                    self.player.apply(cmd)
+                except Exception as e:
+                    if not self._player_error_logged:
+                        self._log(f"عطل في التشغيل: {e}")
+                        self._player_error_logged = True
+                else:
+                    self._player_error_logged = False
                 self._update_readouts(now, cmd, db, auto.is_speech)
             else:
                 self.db_label.config(text=f"dB: {db:.0f} (المحرك متوقف)")
@@ -677,7 +693,7 @@ class DesktopApp:
         فائدة. لا نمسّ حالة المحرك: مؤقّتاتها على الزمن الحقيقي، وتصفيرها
         عند القفزة كان سيهدم عدّاد الخمول بلا داع.
         """
-        self.clock._enabled = bool(self.sim_on.get())
+        self.clock.set_enabled(bool(self.sim_on.get()))
         if self.clock.enabled and not self.clock.offset_sec:
             self._sync_sim_fields()
         self._log(
@@ -693,6 +709,9 @@ class DesktopApp:
             hour = int(self.sim_hour.get())
             minute = int(self.sim_minute.get())
         except (TypeError, ValueError, tk.TclError):
+            # إدخال غير صالح: نعيد الحقل إلى ما تعكسه الساعة فعلاً، وإلا
+            # بقي الحقل يعرض قيمة لم تصل الساعة أصلاً.
+            self._sync_sim_fields()
             return
         self._updating = True
         try:
