@@ -22,8 +22,8 @@ set PYTHONUTF8=1
 python -m src.context_aware_audio.sound_synth   # generate assets/*.wav
 python -m src.context_aware_audio.simulate      # 6 scenarios, no audio hardware
 python -m src.context_aware_audio.app           # desktop UI
-python tests/test_engine.py                     # 26 checks - decision logic
-python tests/test_desktop.py                    # 41 checks - assets/player/VAD/prayer
+python tests/test_engine.py                     # 37 checks - decision logic
+python tests/test_desktop.py                    # 164 checks - assets/player/VAD/prayer/UI
 ```
 
 Before declaring work done: `py_compile` all modules, `flake8 --select=F`, both
@@ -105,14 +105,21 @@ Conventions that matter:
 - Test conflicts, not just happy paths: prayer vs welcome, cooldown expiry.
 - `test_engine.py` for decision logic, `test_desktop.py` for hardware-adjacent
   code with hardware faked out.
-- Cover every new code path. The desktop suite grew 36 -> 41 when I added
-  provider coverage; do not skip it.
+- Cover every new code path, and reproduce each bug before fixing it. Three
+  rounds of review review found bugs that the green suite could not see
+  because the happy path was the only path tested. A test that cannot fail
+  for the reason you fixed is not a regression test — a fake whose
+  `terminate()` is missing will happily pass a handle-leak assertion.
+- `pytest` is not the runner: these scripts call `sys.exit()`, so pytest
+  errors during collection. That is expected, not a bug.
 
 ## Docstring and comment style
 
 Arabic, matching the existing files. Fully Arabic prose — no English words
 mixed into an Arabic sentence. It is easy to leak ("three backends", "Uses
-config") and it reads as unfinished.
+config", and once `tanpa` and `contra` slipped in) and it reads as
+unfinished. Run a scan over comments and docstrings before committing:
+Latin words adjacent to Arabic letters, excluding identifiers in code.
 
 ```python
 def athan_moment(self, now, window_sec=60):

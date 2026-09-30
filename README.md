@@ -23,9 +23,12 @@ python -m src.context_aware_audio.app            # واجهة سطح المكت�
 
 ```bash
 python tests/test_engine.py     # 37 اختباراً - منطق المحرك
-python tests/test_desktop.py    # 73 اختباراً - الأصول/المشغل/VAD/الصلاة/الإعدادات/السجل
+python tests/test_desktop.py    # 164 اختباراً - الأصول/المشغل/VAD/الصلاة/الإعدادات/الواجهة
 python -m src.context_aware_audio.simulate
 ```
+
+الاختبارات نصوص تُشغَّل مباشرة (ليست pytest) — عمداً: بلا اعتماديات،
+وحجمها 37 + 164 تحقّقاً في أقل من ثانيتين.
 
 ## البناء كملف exe
 
@@ -64,7 +67,7 @@ src/context_aware_audio/
   simulated_player.py   # مشغل وهمي (للمحاكاة والاختبارات، بلا صوت حقيقي)
   real_player.py        # مشغل حقيقي: crossfade مزدوج + fade ناعم + master/EQ
   mic_input.py          # ميكروفون: sounddevice/pyaudio + اختيار الجهاز + معايرة
-  settings.py           # حفظ الإعدادات في assets/settings.json
+  settings.py           # حفظ الإعدادات في assets/settings.json (تنقية أنواع + كتابة ذرّية)
   paths.py              # مسارات موحّدة: أصول للقراءة، وبيانات مستخدم للكتابة
   log_setup.py          # ربط stdout وملف السجل + التقاط الاستثناءات (وضع exe)
   sound_synth.py        # توليد 9 ملفات WAV حقيقية في assets/ بـ numpy فقط
@@ -122,6 +125,8 @@ assets/                 # ملفات WAV المولدة (والمخرجات وق
 - المواقيت `prayer_provider`: يقرأ `city/country/prayer_method` من `EngineConfig`
   افتراضياً صنعاء + رابطة العالم الإسلامي، مع كاش وفFallback لأوقات تقريبية.
 - كشف الترحيب: قفزة بداية + استمرار 0.3ث + كبح 3ث. الترقية: keyword-spotting لـ "أرحبوا/حياكم الله".
+- نغمة الأذان على قناة مستقلة، فلا يقطعها كتم الخلفية.
+- الملف التالف أو الناقص يُبلَّغ عنه مرة واحدة (`PLAY-FAILED`) ثم يُتخطّى حتى يتغيّر على القرص.
 - في وضع exe، الملفات القابلة للكتابة (settings/kash/سجل) تذهب إلى `%LOCALAPPDATA%\ContextAudio`.
 - `webrtcvad` اختياري: تحسّن دقة كشف الكلام لكنها تحتاج Visual C++ Build Tools
   للتثبيت (ملف مستقل `requirements-optional.txt`). بدونها يعمل المحرك على الطاقة فقط.
