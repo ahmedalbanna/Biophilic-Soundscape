@@ -20,7 +20,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .service import AudioService
 
@@ -141,7 +141,18 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"error": "لا يوجد"}, 404)
 
     def _serve_file(self, rel: str):
-        target = (WEB_DIR / rel).resolve()
+        """
+        يخدم ملفاً من web/، ولا يخدم ما خارجه.
+
+        فكّ الترميز قبل الفحص لا بعده: `%2e%2e` هي `..` في معنى
+        المسار، وبلا فكّها كانت الحراسة ميّتة - الحراسة الحقيقية
+        لمسارٍ نظيف لا يجتاز شيئاً. وفكّها في المرور ضروري أصلاً:
+        اسمٌ فيه مسافة أو حرف غير ascii لا يُخدَم بلا فكّ.
+
+        الترتيب هو الحماية: تُفكّ النقاط، ثم يُقارن المسار المحلول
+        بمجلد web. لو قُورن قبل الحلّ لأمكن الخروج بحرفٍ واحد.
+        """
+        target = (WEB_DIR / unquote(rel)).resolve()
         try:
             target.relative_to(WEB_DIR.resolve())
         except ValueError:
@@ -186,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._json({"error": "Content-Length غير صالح"}, 400)
         # سقف قبل القراءة لا بعدها: الخادم الذي يقرأ gigabyte ثم يرفضه
-        # ليس خادماً؛拒绝 أبكر وأرخص. والصفحة ترسل إعدادات لا تنال
+        # ليس خادماً؛ والرفض أبكر وأرخص. والصفحة ترسل إعدادات
         # كيلوبايت، فالسقف لا يزعجها.
         if length > MAX_BODY_BYTES:
             return self._json({"error": "الطلب أكبر من السقف"}, 413)

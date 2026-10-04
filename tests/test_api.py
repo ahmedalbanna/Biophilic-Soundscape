@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.context_aware_audio import settings
 from src.context_aware_audio.api import build_server
 
+ROOT = Path(__file__).resolve().parents[1]
 PASSED = FAILED = 0
 PORT = 8799
 
@@ -117,15 +118,34 @@ try:
             )
 
         # ===== 2) اجتياز المسار =====
+        # اجتياز المسار. النقاط مُرمّزة: يطبّعها العميل قبل الإرسال،
+        # فيصل الخادم مساراً نظيفاً لا اجتيازاً، فيجيب 404 — وهو
+        # جوابٌ صحيح لسببٍ خطأ. الترميز يجعل الطلب يصل فعلاً.
+        #
+        # مستوى واحد لا اثنان. من web/ يصعد «..» إلى جذر العمل، لا إلى
+        # جذر القرص. بمستويين كان الهدف Users\ahmed\src\... وهو غير
+        # موجود، فكان الجواب 404 لغياب الملف لا للحراسة - والفحص يمرّ
+        # والحراسة مطفأة. هذا ما يجعل الفحص يكذب لا أن يسقط.
         for evil in (
-            "/static/../api.py",
-            "/static/..%2Fapi.py",
-            "/static/../../src/context_aware_audio/api.py",
+            "/static/%2e%2e/src/context_aware_audio/api.py",
+            "/static/..%2fsrc/context_aware_audio/api.py",
+            "/static/%2e%2e/src/context_aware_audio/api.py?x=1",
         ):
             code, body = req(evil)
             check(
-                f"traversal: {evil} refused", code in (403, 404), f"{code} {body[:50]}"
+                f"traversal: {evil} refused", code in (403, 404),
+                f"{code} {body[:60]}",
             )
+        # والدليل أن الهدف موجود فعلاً: بلا هذا قد يكون 404 لغيابه
+        target = ROOT / "src/context_aware_audio/api.py"
+        check("traversal: the target really exists", target.is_file(), target)
+        check(
+            "traversal: and it is outside the web directory",
+            not str(target).startswith(str(ROOT / "web")),
+            target,
+        )
+        code, _ = req("/static/app.js")
+        check("traversal: the real file is still served", code == 200, code)
 
         # ===== 3) س(serialisable) =====
         code, body = req("/api/state")
